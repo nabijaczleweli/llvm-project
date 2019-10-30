@@ -10122,6 +10122,149 @@ static bool EvaluateBuiltinConstantPForLValue(const APValue &LV) {
   }
 }
 
+static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCall, const Expr *FileNameArg, const Expr *FileNameSizeArg, const Expr *OutPointerPointerArg, const APSInt* pAPEmbedLimit, APSInt& APEmbedSize) {
+  APSInt APFileNameSizeLimit;
+  if (!EvaluateInteger(FileNameSizeArg, APFileNameSizeLimit, Info))
+    return false;
+  LValue LRawFileName;
+  if (!EvaluatePointer(FileNameArg, LRawFileName, Info))
+    return false;
+  LValue LOutPointer;
+  if (!EvaluatePointer(OutPointerPointerArg, LOutPointer, Info))
+    return false;
+  SmallVector<char, 32> BackingFileIfSerialized;
+  StringRef RawFileName{};
+
+  // If we have a string literal, directly reference to save speed/time
+  if (const StringLiteral *pS = dyn_cast_or_null<StringLiteral>(
+          LRawFileName.getLValueBase().dyn_cast<const Expr *>())) {
+    // YES, we ignore null terminators:
+    // size is checked later
+    RawFileName = pS->getBytes();
+  }
+
+  if (RawFileName.data() == nullptr) {
+    // Slow path: load each individual
+    // char until end of array  
+    QualType FileNameCharTy = FileNameArg->getType()->getPointeeType();
+    for (uint64_t Strlen = 0; /**/; ++Strlen) {
+      APValue Char;
+      bool RValueCharConversion = !handleLValueToRValueConversion(Info, BuiltinCall, FileNameCharTy, LRawFileName, Char);
+      if (!RValueCharConversion || !Char.isInt()) {
+        return false;
+      }
+      APSInt& CharValue = Char.getInt();
+      BackingFileIfSerialized.push_back(static_cast<char>(CharValue.getZExtValue()));
+    }
+    RawFileName = StringRef(BackingFileIfSerialized.data(), BackingFileIfSerialized.size());
+  }
+
+  // We now have the full file name
+  if (APFileNameSizeLimit.isNegative()) {
+      Info.FFDiag(FileNameSizeArg, diag::err_integral_constant_out_of_range);
+    return false;
+  }
+  if (APFileNameSizeLimit.getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
+    // FIXME: better error message
+    Info.FFDiag(FileNameSizeArg, diag::err_integer_literal_too_large);
+    return false;
+  }
+
+  // We now have the file size limit
+  size_t FileNameSizeLimit = static_cast<size_t>(APFileNameSizeLimit.getZExtValue());
+  if (FileNameSizeLimit > RawFileName.size()) {
+    Info.FFDiag(FileNameSizeArg, diag::err_integer_literal_too_large);
+    return false;
+  }
+  
+  StringRef FileName(RawFileName.data(), FileNameSizeLimit);
+  
+  // get to the file system
+  FileManager& Files = Info.Ctx.getSourceManager().getFileManager();
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeFileData = Files.getBufferForFile(FileName);
+  if (!MaybeFileData) {
+    Info.FFDiag(FileNameArg, diag::err_cannot_open_file);
+    return false;
+  }
+
+  std::unique_ptr<llvm::MemoryBuffer>& FileData = *MaybeFileData;
+  if (!FileData) {
+    Info.FFDiag(FileNameArg, diag::err_cannot_open_file);
+    return false;
+  }
+
+  size_t FileSize = static_cast<size_t>(FileData->getBufferSize());
+  size_t ReadSize = FileSize;
+  if (pAPEmbedLimit != nullptr) {
+    if (pAPEmbedLimit->getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
+      Info.FFDiag(BuiltinCall, diag::err_integer_literal_too_large);
+      return false;
+    }
+    size_t EmbedLimit = static_cast<size_t>(pAPEmbedLimit->getZExtValue());
+    if (EmbedLimit > FileSize) {
+      // FIXME: warn that the file size is less than the desired read size
+      ReadSize = FileSize;
+    }
+    else {
+      ReadSize = EmbedLimit;
+    }
+  }
+
+  ASTContext& Context = Info.Ctx;
+  QualType ReturnType = BuiltinCall->getCallReturnType(Context);
+  if (ReadSize < 1 || LOutPointer.isNullPointer()) {
+    // no data to read: just return the size
+    APEmbedSize = APSInt(Context.getTypeSize(ReturnType), true);
+    APEmbedSize = ReadSize;
+    return true;
+  }
+
+  // Get the StringRef we want to use
+  StringRef EmbedDataRef(FileData->getBufferStart(), ReadSize);
+  // Size appropriately. Note that these functions return size in BITS,
+  // not chars/bytes/whatever.
+  QualType OutCharTy = OutPointerPointerArg->getType()->getPointeeType()->getPointeeType();
+  uint32_t BitCharSize = Context.getTypeSize(OutCharTy);
+  uint32_t CharSize = BitCharSize / Context.getCharWidth();
+  // FIXME: WORDS CANNOT DESCRIBE HOW MUCH MEMORY THIS EATS
+  // AND HOW OBSCENELY SLOW IT IS
+  // Use the same techniques that build string literals
+  // to build a non-null-terminated string literal here
+  // and save on the crappy memory usage...
+  APValue EmbedData(APValue::UninitArray(), EmbedDataRef.size(), CharSize);
+  APSInt DataTemp(BitCharSize, true);
+  for (size_t Index = 0; Index < EmbedDataRef.size(); ++Index) {
+    DataTemp = EmbedDataRef[Index];
+    EmbedData.getArrayInitializedElt(Index) = APValue(DataTemp);
+  }
+#if 0
+  QualType EmbedDataArrayType = Context.getStringLiteralArrayType(OutCharTy, EmbedDataRef.size() - 1);
+  LValue LTempArray;
+  Info.CurrentCall->createTemporary(BuiltinCall, EmbedDataArrayType, true, LTempArray);
+#endif // Help!
+  // This part is wrong, I know it is, but I have no idea what
+  // to do otherwise
+  QualType LOutPointerType = OutPointerPointerArg->getType()->getPointeeType();
+  if (!handleAssignment(Info, BuiltinCall, LOutPointer, LOutPointerType, EmbedData))
+    return false;
+
+  // great success
+  APEmbedSize = APSInt(Context.getTypeSize(ReturnType), true);
+  APEmbedSize = EmbedDataRef.size();
+  return true;
+}
+
+static bool EvaluateBuiltinEmbedN(EvalInfo &Info, const CallExpr* Call, const Expr *FileNameArg, const Expr *FileNameSizeArg, const Expr *OutPointerPointerArg, const Expr* EmbedLimitArg, APSInt& APEmbedSize) {
+  APSInt APEmbedLimit;
+  if (!EvaluateInteger(EmbedLimitArg, APEmbedLimit, Info))
+    return false;
+  return EvaluateBuiltinEmbedNWith(Info, Call, FileNameArg, FileNameSizeArg, OutPointerPointerArg, &APEmbedLimit, APEmbedSize);
+}
+
+static bool EvaluateBuiltinEmbed(EvalInfo &Info, const CallExpr* Call, const Expr *FileNameArg, const Expr *FileNameSizeArg, const Expr *OutPointerPointerArg, APSInt& APEmbedSize) {
+  return EvaluateBuiltinEmbedNWith(Info, Call, FileNameArg, FileNameSizeArg, OutPointerPointerArg, nullptr, APEmbedSize);
+}
+
 /// EvaluateBuiltinConstantP - Evaluate __builtin_constant_p as similarly to
 /// GCC as we can manage.
 static bool EvaluateBuiltinConstantP(EvalInfo &Info, const Expr *Arg) {
@@ -10549,6 +10692,21 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
 
     return Success(Val.byteSwap(), E);
   }
+
+  case Builtin::BI__builtin_embed: {
+      APSInt EmbedSize;
+      if (!EvaluateBuiltinEmbed(Info, E, E->getArg(0), E->getArg(1), E->getArg(2), EmbedSize))
+        return false;
+      
+      return Success(EmbedSize, E);
+    }
+  case Builtin::BI__builtin_embed_n: {
+      APSInt EmbedSize;
+      if (!EvaluateBuiltinEmbedN(Info, E, E->getArg(0), E->getArg(1), E->getArg(2), E->getArg(3), EmbedSize))
+        return false;
+      
+      return Success(EmbedSize, E);
+    }
 
   case Builtin::BI__builtin_classify_type:
     return Success((int)EvaluateBuiltinClassifyType(E, Info.getLangOpts()), E);

@@ -525,6 +525,8 @@ BUILTIN(__builtin_vsprintf, "ic*cC*a", "nFP:1:")
 BUILTIN(__builtin_vsnprintf, "ic*zcC*a", "nFP:2:")
 BUILTIN(__builtin_thread_pointer, "v*", "nc")
 BUILTIN(__builtin_launder, "v*v*", "nt")
+BUILTIN(__builtin_embed, "zcC*zcC**", "nc")
+BUILTIN(__builtin_embed_n, "zcC*zcC**z", "nc")
 LANGBUILTIN(__builtin_is_constant_evaluated, "b", "n", CXX_LANG)
 
 // GCC exception builtins
