@@ -10141,8 +10141,6 @@ static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCal
   // If we have a string literal, directly reference to save speed/time
   if (const StringLiteral *pS = dyn_cast_or_null<StringLiteral>(
           LRawFileName.getLValueBase().dyn_cast<const Expr *>())) {
-    // YES, we ignore null terminators:
-    // size is checked later
     RawFileName = pS->getBytes();
   }
 
@@ -10164,12 +10162,11 @@ static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCal
 
   // We now have the full file name
   if (APFileNameSizeLimit.isNegative()) {
-      Info.FFDiag(FileNameSizeArg, diag::err_integral_constant_out_of_range);
+    Info.FFDiag(FileNameSizeArg, diag::err_integral_constant_must_be_positive);
     return false;
   }
   if (APFileNameSizeLimit.getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
-    // FIXME: better error message
-    Info.FFDiag(FileNameSizeArg, diag::err_integer_literal_too_large);
+    Info.FFDiag(FileNameSizeArg, diag::err_integral_constant_too_large);
     return false;
   }
 
@@ -10200,12 +10197,11 @@ static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCal
   size_t ReadSize = FileSize;
   if (pAPEmbedLimit != nullptr) {
     if (pAPEmbedLimit->getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
-      Info.FFDiag(BuiltinCall, diag::err_integer_literal_too_large);
+      Info.FFDiag(BuiltinCall, diag::err_integral_constant_too_large);
       return false;
     }
     size_t EmbedLimit = static_cast<size_t>(pAPEmbedLimit->getZExtValue());
     if (EmbedLimit > FileSize) {
-      // FIXME: warn that the file size is less than the desired read size
       ReadSize = FileSize;
     }
     else {

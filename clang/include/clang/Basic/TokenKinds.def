@@ -120,6 +120,10 @@ PPKEYWORD(unassert)
 PPKEYWORD(__public_macro)
 PPKEYWORD(__private_macro)
 
+// Clang extensions - embed
+PPKEYWORD(embed)
+PPKEYWORD(embed_str)
+
 //===----------------------------------------------------------------------===//
 // Language keywords.
 //===----------------------------------------------------------------------===//

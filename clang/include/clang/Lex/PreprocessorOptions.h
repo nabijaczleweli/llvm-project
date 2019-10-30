@@ -45,6 +45,7 @@ public:
   std::vector<std::pair<std::string, bool/*isUndef*/>> Macros;
   std::vector<std::string> Includes;
   std::vector<std::string> MacroIncludes;
+  std::vector<std::string> Embeds;
 
   /// Initialize the preprocessor with the compiler and target specific
   /// predefines.
@@ -207,6 +208,7 @@ public:
   /// module.
   void resetNonModularOptions() {
     Includes.clear();
+    Embeds.clear();
     MacroIncludes.clear();
     ChainedIncludes.clear();
     DumpDeserializedPCHDecls = false;
