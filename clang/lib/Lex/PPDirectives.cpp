@@ -1049,6 +1049,13 @@ void Preprocessor::HandleDirective(Token &Result) {
       if (getLangOpts().Modules)
         return HandleMacroPrivateDirective();
       break;
+
+    case tok::pp_embed:
+      // Handle #include.
+      return HandleEmbed(SavedHash.getLocation(), Result);
+    case tok::pp_embed_str:
+      // Handle -imacros.
+      return HandleEmbedStr(SavedHash.getLocation(), Result);
     }
     break;
   }
@@ -1134,6 +1141,51 @@ static bool GetLineValue(Token &DigitTok, unsigned &Val,
   if (DigitTokBegin[0] == '0' && Val)
     PP.Diag(DigitTok.getLocation(), diag::warn_pp_line_decimal)
       << IsGNULineDirective;
+
+  return false;
+}
+
+/// GetSizeNumeric - Convert a numeric token into an size_t value, emitting
+/// Diagnostics if it is invalid, and returning the value in Val.
+static bool GetSizeNumeric(Token &DigitTok, size_t &Val, Preprocessor &PP) {
+  if (DigitTok.isNot(tok::numeric_constant)) {
+    PP.Diag(DigitTok, diag::err_expected) << "integral constant";
+    return true;
+  }
+
+  SmallString<64> IntegerBuffer;
+  IntegerBuffer.resize(DigitTok.getLength());
+  const char *DigitTokBegin = &IntegerBuffer[0];
+  bool Invalid = false;
+  size_t ActualLength = PP.getSpelling(DigitTok, DigitTokBegin, &Invalid);
+  if (Invalid)
+    return true;
+
+  // Verify that we have a simple digit-sequence, and compute the value.  This
+  // is always a simple digit string computed in decimal, so we do this manually
+  // here.
+  Val = 0;
+  for (size_t i = 0; i != ActualLength; ++i) {
+    // C++1y [lex.fcon]p1:
+    //   Optional separating single quotes in a digit-sequence are ignored
+    if (DigitTokBegin[i] == '\'')
+      continue;
+
+    if (!isDigit(DigitTokBegin[i])) {
+      PP.Diag(PP.AdvanceToTokenCharacter(DigitTok.getLocation(), i),
+              diag::err_invalid_digit) << StringRef(&DigitTokBegin[i], 1) << 0;
+      PP.DiscardUntilEndOfDirective();
+      return true;
+    }
+
+    size_t NextVal = Val*10+(DigitTokBegin[i]-'0');
+    if (NextVal < Val) { // overflow.
+      PP.Diag(DigitTok, diag::err_integer_literal_too_large);
+      PP.DiscardUntilEndOfDirective();
+      return true;
+    }
+    Val = NextVal;
+  }
 
   return false;
 }
@@ -1838,6 +1890,133 @@ Optional<FileEntryRef> Preprocessor::LookupHeaderIncludeOrImport(
   return None;
 }
 
+Optional<FileEntryRef> Preprocessor::LookupEmbed(
+    const DirectoryLookup *&CurDir, StringRef Filename,
+    SourceLocation FilenameLoc, CharSourceRange FilenameRange,
+    const Token &FilenameTok, bool &IsFrameworkFound,
+    bool &IsMapped, const DirectoryLookup *LookupFrom,
+    const FileEntry *LookupFromFile, StringRef LookupFilename,
+    SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
+    ModuleMap::KnownHeader &SuggestedModule, bool isAngled) {
+  Optional<FileEntryRef> File = LookupFile(
+      FilenameLoc, LookupFilename,
+      isAngled, LookupFrom, LookupFromFile, CurDir,
+      Callbacks ? &SearchPath : nullptr, Callbacks ? &RelativePath : nullptr,
+      &SuggestedModule, &IsMapped, &IsFrameworkFound);
+  if (File)
+    return File;
+
+  if (Callbacks) {
+    // Give the clients a chance to recover.
+    SmallString<128> RecoveryPath;
+    if (Callbacks->FileNotFound(Filename, RecoveryPath)) {
+      if (auto DE = FileMgr.getOptionalDirectoryRef(RecoveryPath)) {
+        // Add the recovery path to the list of search paths.
+        DirectoryLookup DL(*DE, SrcMgr::C_User, false);
+        HeaderInfo.AddSearchPath(DL, isAngled);
+
+        // Try the lookup again, skipping the cache.
+        Optional<FileEntryRef> File = LookupFile(
+            FilenameLoc,
+            LookupFilename, isAngled,
+            LookupFrom, LookupFromFile, CurDir, nullptr, nullptr,
+            &SuggestedModule, &IsMapped, /*IsFrameworkFound=*/nullptr,
+            /*SkipCache*/ true);
+        if (File)
+          return File;
+      }
+    }
+  }
+
+  if (SuppressIncludeNotFoundError)
+    return None;
+
+  // If the file could not be located and it was included via angle
+  // brackets, we can attempt a lookup as though it were a quoted path to
+  // provide the user with a possible fixit.
+  if (isAngled) {
+    Optional<FileEntryRef> File = LookupFile(
+        FilenameLoc, LookupFilename,
+        false, LookupFrom, LookupFromFile, CurDir,
+        Callbacks ? &SearchPath : nullptr, Callbacks ? &RelativePath : nullptr,
+        &SuggestedModule, &IsMapped,
+        /*IsFrameworkFound=*/nullptr);
+    if (File) {
+      Diag(FilenameTok, diag::err_pp_file_not_found_angled_include_not_fatal)
+          << Filename << false
+          << FixItHint::CreateReplacement(FilenameRange,
+                                          "\"" + Filename.str() + "\"");
+      return File;
+    }
+  }
+
+  // Check for likely typos due to leading or trailing non-isAlphanumeric
+  // characters
+  StringRef OriginalFilename = Filename;
+  if (LangOpts.SpellChecking) {
+    // A heuristic to correct a typo file name by removing leading and
+    // trailing non-isAlphanumeric characters.
+    auto CorrectTypoFilename = [](llvm::StringRef Filename) {
+      Filename = Filename.drop_until(isAlphanumeric);
+      while (!Filename.empty() && !isAlphanumeric(Filename.back())) {
+        Filename = Filename.drop_back();
+      }
+      return Filename;
+    };
+    StringRef TypoCorrectionName = CorrectTypoFilename(Filename);
+
+#ifndef _WIN32
+    // Normalize slashes when compiling with -fms-extensions on non-Windows.
+    // This is unnecessary on Windows since the filesystem there handles
+    // backslashes.
+    SmallString<128> NormalizedTypoCorrectionPath;
+    if (LangOpts.MicrosoftExt) {
+      NormalizedTypoCorrectionPath = TypoCorrectionName;
+      llvm::sys::path::native(NormalizedTypoCorrectionPath);
+      TypoCorrectionName = NormalizedTypoCorrectionPath;
+    }
+#endif
+
+    Optional<FileEntryRef> File = LookupFile(
+        FilenameLoc, TypoCorrectionName, isAngled, LookupFrom, LookupFromFile,
+        CurDir, Callbacks ? &SearchPath : nullptr,
+        Callbacks ? &RelativePath : nullptr, &SuggestedModule, &IsMapped,
+        /*IsFrameworkFound=*/nullptr);
+    if (File) {
+      auto Hint =
+          isAngled ? FixItHint::CreateReplacement(
+                         FilenameRange, "<" + TypoCorrectionName.str() + ">")
+                   : FixItHint::CreateReplacement(
+                         FilenameRange, "\"" + TypoCorrectionName.str() + "\"");
+      Diag(FilenameTok, diag::err_pp_file_not_found_typo_not_fatal)
+          << OriginalFilename << TypoCorrectionName << Hint;
+      // We found the file, so set the Filename to the name after typo
+      // correction.
+      Filename = TypoCorrectionName;
+      return File;
+    }
+  }
+
+  // If the file is still not found, just go with the vanilla diagnostic
+  assert(!File.hasValue() && "expected missing file");
+  Diag(FilenameTok, diag::err_pp_file_not_found)
+      << OriginalFilename << FilenameRange;
+  if (IsFrameworkFound) {
+    size_t SlashPos = OriginalFilename.find('/');
+    assert(SlashPos != StringRef::npos &&
+           "Include with framework name should have '/' in the filename");
+    StringRef FrameworkName = OriginalFilename.substr(0, SlashPos);
+    FrameworkCacheEntry &CacheEntry =
+        HeaderInfo.LookupFrameworkCache(FrameworkName);
+    assert(CacheEntry.Directory && "Found framework should be in cache");
+    Diag(FilenameTok, diag::note_pp_framework_without_header)
+        << OriginalFilename.substr(SlashPos + 1) << FrameworkName
+        << CacheEntry.Directory->getName();
+  }
+
+  return None;
+}
+
 /// Handle either a #include-like directive or an import declaration that names
 /// a header file.
 ///
@@ -2303,6 +2482,105 @@ void Preprocessor::HandleIncludeMacrosDirective(SourceLocation HashLoc,
     Lex(TmpTok);
     assert(TmpTok.isNot(tok::eof) && "Didn't find end of -imacros!");
   } while (TmpTok.isNot(tok::hashhash));
+}
+
+/// HandleEmbed - The "\#embed" token has been read
+void Preprocessor::HandleEmbed(SourceLocation HashLoc,
+                                          Token &IncludeTok) {
+  HandleEmbedEither(HashLoc, IncludeTok, false, LookupFrom, LookupFromFile);
+}
+
+/// HandleEmbedStr - The "\#embed_str" token has been read
+void Preprocessor::HandleEmbedStr(SourceLocation HashLoc,
+                                          Token &IncludeTok) {
+  HandleEmbedEither(HashLoc, IncludeTok, true, LookupFrom, LookupFromFile);
+}
+
+/// HandleEmbedEither - Shared code for "\#embed" or "\#embed_str"
+void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
+                                          Token &IncludeTok, bool Str) {
+  if (!LangOpts.CPlusPlus && !LangOpts.C2x) {
+    Diag(IncludeTok, diag::err_pp_invalid_directive);
+  }
+
+  Token FilenameTok;
+  llvm::Optional<size_t> MaybeLimit;
+  if (LexHeaderName(FilenameTok)) {
+    Token LimitTok;
+    LexNonComment(LimitTok);
+    if (LimitTok.isNot(tok::numeric_constant))
+      return;
+    if (LexHeaderName(FilenameTok))
+      return;
+    size_t Limit;
+    if (GetSizeNumeric(LimitTok, Limit, *this))
+      return;
+    MaybeLimit = Limit;
+  }
+
+  if (FilenameTok.isNot(tok::header_name)) {
+    Diag(FilenameTok.getLocation(), diag::err_pp_expects_filename);
+    if (FilenameTok.isNot(tok::eod))
+      DiscardUntilEndOfDirective();
+    return;
+  }
+
+  SmallString<128> FilenameBuffer;
+  StringRef Filename = getSpelling(FilenameTok, FilenameBuffer);
+  SourceLocation CharEnd = FilenameTok.getEndLoc();
+
+  CharSourceRange FilenameRange
+    = CharSourceRange::getCharRange(FilenameTok.getLocation(), CharEnd);
+  StringRef OriginalFilename = Filename;
+
+  // this returns an error if it fails
+  // and FileName is set to an empty/null str
+  bool isAngled =
+    GetIncludeFilenameSpelling(FilenameTok.getLocation(), Filename);
+  
+  if (Filename.empty())
+    return;
+
+  if (HeaderInfo.HasIncludeAliasMap()) {
+    // Map the filename with the brackets still attached.  If the name doesn't
+    // map to anything, fall back on the filename we've already gotten the
+    // spelling for.
+    StringRef NewName = HeaderInfo.MapHeaderToIncludeAlias(OriginalFilename);
+    if (!NewName.empty())
+      Filename = NewName;
+  }
+
+  // Search include directories.
+  bool IsMapped = false;
+  bool IsFrameworkFound = false;
+  const DirectoryLookup *CurDir;
+  SmallString<1024> SearchPath;
+  SmallString<1024> RelativePath;
+  // We get the raw path only if we have 'Callbacks' to which we later pass
+  // the path.
+  ModuleMap::KnownHeader SuggestedModule;
+  SourceLocation FilenameLoc = FilenameTok.getLocation();
+  StringRef LookupFilename = Filename;
+
+#ifndef _WIN32
+  // Normalize slashes when compiling with -fms-extensions on non-Windows. This
+  // is unnecessary on Windows since the filesystem there handles backslashes.
+  SmallString<128> NormalizedPath;
+  if (LangOpts.MicrosoftExt) {
+    NormalizedPath = Filename.str();
+    llvm::sys::path::native(NormalizedPath);
+    LookupFilename = NormalizedPath;
+  }
+#endif
+
+  Optional<FileEntryRef> File = LookupEmbed(
+      CurDir, Filename, FilenameLoc, FilenameRange, FilenameTok,
+      IsFrameworkFound, IsMapped, LookupFrom, LookupFromFile,
+      LookupFilename, RelativePath, SearchPath, SuggestedModule, isAngled);
+
+  if (!File || !File->)
+
+  DiscardUntilEndOfDirective();
 }
 
 //===----------------------------------------------------------------------===//

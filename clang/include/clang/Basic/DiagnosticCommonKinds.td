@@ -194,6 +194,10 @@ def ext_integer_literal_too_large_for_signed : ExtWarn<
   "integer literal is too large to be represented in a signed integer type, "
   "interpreting as unsigned">,
   InGroup<ImplicitlyUnsignedLiteral>;
+def err_integral_constant_too_large : Error<
+  "integral constant is too large for Clang to handle">;
+def err_integral_constant_must_be_positive : Error<
+  "integral constant must be positive">;
 def warn_old_implicitly_unsigned_long : Warning<
   "integer literal is too large to be represented in type 'long', "
   "interpreting as 'unsigned long' per C89; this literal will "

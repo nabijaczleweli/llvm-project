@@ -3355,6 +3355,10 @@ static void ParsePreprocessorArgs(PreprocessorOptions &Opts, ArgList &Args,
       Opts.ObjCXXARCStandardLibrary = (ObjCXXARCStandardLibraryKind)Library;
   }
 
+  // Add ordered list of Embed paths
+  for (const auto *A : Args.filtered(OPT_fembed_path))
+    Opts.Embeds.emplace_back(A->getValue());
+
   // Always avoid lexing editor placeholders when we're just running the
   // preprocessor as we never want to emit the
   // "editor placeholder in source file" error in PP only mode.

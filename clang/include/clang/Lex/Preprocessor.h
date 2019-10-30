@@ -2212,6 +2212,15 @@ private:
       SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
       ModuleMap::KnownHeader &SuggestedModule, bool isAngled);
 
+  Optional<FileEntryRef> LookupEmbed(
+      const DirectoryLookup *&CurDir, StringRef Filename,
+      SourceLocation FilenameLoc, CharSourceRange FilenameRange,
+      const Token &FilenameTok, bool &IsFrameworkFound,
+      bool &IsMapped, const DirectoryLookup *LookupFrom,
+      const FileEntry *LookupFromFile, StringRef LookupFilename,
+      SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
+      ModuleMap::KnownHeader &SuggestedModule, bool isAngled);
+
   // File inclusion.
   void HandleIncludeDirective(SourceLocation HashLoc, Token &Tok,
                               const DirectoryLookup *LookupFrom = nullptr,
@@ -2225,6 +2234,12 @@ private:
   void HandleIncludeMacrosDirective(SourceLocation HashLoc, Token &Tok);
   void HandleImportDirective(SourceLocation HashLoc, Token &Tok);
   void HandleMicrosoftImportDirective(Token &Tok);
+
+  // Embed directive.
+  void HandleEmbed(SourceLocation HashLoc, Token &Tok);
+  void HandleEmbedStr(SourceLocation HashLoc, Token &Tok,
+                              const DirectoryLookup *LookupFrom);
+  void HandleEmbedEither(SourceLocation HashLoc, Token &Tok, bool Str);
 
 public:
   /// Check that the given module is available, producing a diagnostic if not.
