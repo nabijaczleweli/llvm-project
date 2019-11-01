@@ -1897,9 +1897,9 @@ Optional<FileEntryRef> Preprocessor::LookupEmbed(
   FileManager& Files = getFileManager();
 
   if (llvm::sys::path::is_absolute(Filename)) {
-    Expected<FileEntryRef> file = Files.getFileRef(Filename);
-    if (file)
-      return *file;
+    llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(Filename));
+    if (MaybeFile)
+      return *MaybeFile;
     return None;
   }
 
@@ -1919,9 +1919,9 @@ Optional<FileEntryRef> Preprocessor::LookupEmbed(
     }
     TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
     StringRef TestFilename = TestFilenameBuffer;
-    Expected<FileEntryRef> file = Files.getFileRef(TestFilename);
-    if (file)
-      return *file;
+    llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(TestFilename));
+    if (MaybeFile)
+      return *MaybeFile;
   }
 
   for (const std::string& EmbedPath : PPOpts->Embeds) {
@@ -1933,9 +1933,9 @@ Optional<FileEntryRef> Preprocessor::LookupEmbed(
     }
     TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
     StringRef TestFilename = TestFilenameBuffer;
-    Expected<FileEntryRef> file = Files.getFileRef(TestFilename);
-    if (file)
-      return *file;
+    llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(TestFilename));
+    if (MaybeFile)
+      return *MaybeFile;
   }
 
   return None;
