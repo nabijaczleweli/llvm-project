@@ -1735,6 +1735,9 @@ def fno_short_wchar : Flag<["-"], "fno-short-wchar">, Group<f_Group>,
 def fembed_path : JoinedOrSeparate<["-"], "fembed-path">, Group<f_Group>,
   Flags<[CC1Option,CC1AsOption]>, MetaVarName<"<dir>">,
   HelpText<"Search path for builtin_embed and preprocessor #embed.">;
+def fembed_path_EQ : JoinedOrSeparate<["-"], "fembed-path=">, Group<f_Group>,
+  Flags<[CC1Option,CC1AsOption]>, MetaVarName<"<dir>">,
+  HelpText<"Search path for builtin_embed and preprocessor #embed.">;
 def fshow_overloads_EQ : Joined<["-"], "fshow-overloads=">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Which overload candidates to show when overload resolution fails: "
            "best|all; defaults to all">, Values<"best,all">;
