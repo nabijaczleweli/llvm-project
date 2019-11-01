@@ -2479,7 +2479,7 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
   if (LangOpts.MicrosoftExt) {
     NormalizedPath = Filename.str();
     llvm::sys::path::native(NormalizedPath);
-    LookupFilename = NormalizedPath;
+    Filename = NormalizedPath;
   }
 #endif
 
