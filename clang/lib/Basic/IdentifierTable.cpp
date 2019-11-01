@@ -288,6 +288,7 @@ tok::PPKeywordKind IdentifierInfo::getPPKeywordID() const {
   CASE( 5, 'i', 'e', ident);
   CASE( 5, 'i', 'd', ifdef);
   CASE( 5, 'u', 'd', undef);
+  CASE( 5, 'e', 'b', embed);
 
   CASE( 6, 'a', 's', assert);
   CASE( 6, 'd', 'f', define);
@@ -300,6 +301,7 @@ tok::PPKeywordKind IdentifierInfo::getPPKeywordID() const {
   CASE( 7, 'w', 'r', warning);
 
   CASE( 8, 'u', 'a', unassert);
+  CASE( 9, 'e', 'b', embed_str);
   CASE(12, 'i', 'c', include_next);
 
   CASE(14, '_', 'p', __public_macro);

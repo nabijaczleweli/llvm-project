@@ -2215,14 +2215,9 @@ private:
       SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
       ModuleMap::KnownHeader &SuggestedModule, bool isAngled);
 
-  Optional<FileEntryRef> LookupEmbed(
-      const DirectoryLookup *&CurDir, StringRef Filename,
+  Optional<FileEntryRef> LookupEmbed(StringRef Filename,
       SourceLocation FilenameLoc, CharSourceRange FilenameRange,
-      const Token &FilenameTok, bool &IsFrameworkFound,
-      bool &IsMapped, const DirectoryLookup *LookupFrom,
-      const FileEntry *LookupFromFile, StringRef LookupFilename,
-      SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
-      ModuleMap::KnownHeader &SuggestedModule, bool isAngled);
+      const Token &FilenameTok, bool IsAngled);
 
   // File inclusion.
   void HandleIncludeDirective(SourceLocation HashLoc, Token &Tok,
@@ -2240,8 +2235,7 @@ private:
 
   // Embed directive.
   void HandleEmbed(SourceLocation HashLoc, Token &Tok);
-  void HandleEmbedStr(SourceLocation HashLoc, Token &Tok,
-                              const DirectoryLookup *LookupFrom);
+  void HandleEmbedStr(SourceLocation HashLoc, Token &Tok);
   void HandleEmbedEither(SourceLocation HashLoc, Token &Tok, bool Str);
 
 public:
