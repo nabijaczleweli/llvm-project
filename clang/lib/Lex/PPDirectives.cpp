@@ -1051,10 +1051,10 @@ void Preprocessor::HandleDirective(Token &Result) {
       break;
 
     case tok::pp_embed:
-      // Handle #include.
+      // Handle #embed.
       return HandleEmbed(SavedHash.getLocation(), Result);
     case tok::pp_embed_str:
-      // Handle -imacros.
+      // Handle #embed_str.
       return HandleEmbedStr(SavedHash.getLocation(), Result);
     }
     break;
@@ -1891,127 +1891,51 @@ Optional<FileEntryRef> Preprocessor::LookupHeaderIncludeOrImport(
 }
 
 Optional<FileEntryRef> Preprocessor::LookupEmbed(
-    const DirectoryLookup *&CurDir, StringRef Filename,
-    SourceLocation FilenameLoc, CharSourceRange FilenameRange,
-    const Token &FilenameTok, bool &IsFrameworkFound,
-    bool &IsMapped, const DirectoryLookup *LookupFrom,
-    const FileEntry *LookupFromFile, StringRef LookupFilename,
-    SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath,
-    ModuleMap::KnownHeader &SuggestedModule, bool isAngled) {
-  Optional<FileEntryRef> File = LookupFile(
-      FilenameLoc, LookupFilename,
-      isAngled, LookupFrom, LookupFromFile, CurDir,
-      Callbacks ? &SearchPath : nullptr, Callbacks ? &RelativePath : nullptr,
-      &SuggestedModule, &IsMapped, &IsFrameworkFound);
-  if (File)
-    return File;
+    StringRef Filename, SourceLocation FilenameLoc, CharSourceRange FilenameRange,
+    const Token &FilenameTok, bool isAngled) {
 
-  if (Callbacks) {
-    // Give the clients a chance to recover.
-    SmallString<128> RecoveryPath;
-    if (Callbacks->FileNotFound(Filename, RecoveryPath)) {
-      if (auto DE = FileMgr.getOptionalDirectoryRef(RecoveryPath)) {
-        // Add the recovery path to the list of search paths.
-        DirectoryLookup DL(*DE, SrcMgr::C_User, false);
-        HeaderInfo.AddSearchPath(DL, isAngled);
+  FileManager& Files = getFileManager();
 
-        // Try the lookup again, skipping the cache.
-        Optional<FileEntryRef> File = LookupFile(
-            FilenameLoc,
-            LookupFilename, isAngled,
-            LookupFrom, LookupFromFile, CurDir, nullptr, nullptr,
-            &SuggestedModule, &IsMapped, /*IsFrameworkFound=*/nullptr,
-            /*SkipCache*/ true);
-        if (File)
-          return File;
-      }
-    }
-  }
-
-  if (SuppressIncludeNotFoundError)
+  if (llvm::sys::path::is_absolute(Filename)) {
+    Expected<FileEntryRef> file = Files.getFileRef(Filename);
+    if (file)
+      return *file;
     return None;
-
-  // If the file could not be located and it was included via angle
-  // brackets, we can attempt a lookup as though it were a quoted path to
-  // provide the user with a possible fixit.
-  if (isAngled) {
-    Optional<FileEntryRef> File = LookupFile(
-        FilenameLoc, LookupFilename,
-        false, LookupFrom, LookupFromFile, CurDir,
-        Callbacks ? &SearchPath : nullptr, Callbacks ? &RelativePath : nullptr,
-        &SuggestedModule, &IsMapped,
-        /*IsFrameworkFound=*/nullptr);
-    if (File) {
-      Diag(FilenameTok, diag::err_pp_file_not_found_angled_include_not_fatal)
-          << Filename << false
-          << FixItHint::CreateReplacement(FilenameRange,
-                                          "\"" + Filename.str() + "\"");
-      return File;
-    }
   }
 
-  // Check for likely typos due to leading or trailing non-isAlphanumeric
-  // characters
-  StringRef OriginalFilename = Filename;
-  if (LangOpts.SpellChecking) {
-    // A heuristic to correct a typo file name by removing leading and
-    // trailing non-isAlphanumeric characters.
-    auto CorrectTypoFilename = [](llvm::StringRef Filename) {
-      Filename = Filename.drop_until(isAlphanumeric);
-      while (!Filename.empty() && !isAlphanumeric(Filename.back())) {
-        Filename = Filename.drop_back();
+  SmallString<128> TestFilenameBuffer;
+  if (!isAngled) {
+    SourceManager& Sources = getSourceManager();
+    StringRef FromFilename = Sources.getFilename(FilenameLoc);
+    if (!FromFilename.empty()) {
+      StringRef FromDir = llvm::sys::path::parent_path(FromFilename);
+      if (!FromDir.empty()) {
+        TestFilenameBuffer.insert(TestFilenameBuffer.end(), FromDir.begin(), FromDir.end());
+        const char& last = TestFilenameBuffer.back();
+        if (last != '\\' && last != '/') {
+          TestFilenameBuffer.push_back('/');
+        }
       }
-      return Filename;
-    };
-    StringRef TypoCorrectionName = CorrectTypoFilename(Filename);
-
-#ifndef _WIN32
-    // Normalize slashes when compiling with -fms-extensions on non-Windows.
-    // This is unnecessary on Windows since the filesystem there handles
-    // backslashes.
-    SmallString<128> NormalizedTypoCorrectionPath;
-    if (LangOpts.MicrosoftExt) {
-      NormalizedTypoCorrectionPath = TypoCorrectionName;
-      llvm::sys::path::native(NormalizedTypoCorrectionPath);
-      TypoCorrectionName = NormalizedTypoCorrectionPath;
     }
-#endif
-
-    Optional<FileEntryRef> File = LookupFile(
-        FilenameLoc, TypoCorrectionName, isAngled, LookupFrom, LookupFromFile,
-        CurDir, Callbacks ? &SearchPath : nullptr,
-        Callbacks ? &RelativePath : nullptr, &SuggestedModule, &IsMapped,
-        /*IsFrameworkFound=*/nullptr);
-    if (File) {
-      auto Hint =
-          isAngled ? FixItHint::CreateReplacement(
-                         FilenameRange, "<" + TypoCorrectionName.str() + ">")
-                   : FixItHint::CreateReplacement(
-                         FilenameRange, "\"" + TypoCorrectionName.str() + "\"");
-      Diag(FilenameTok, diag::err_pp_file_not_found_typo_not_fatal)
-          << OriginalFilename << TypoCorrectionName << Hint;
-      // We found the file, so set the Filename to the name after typo
-      // correction.
-      Filename = TypoCorrectionName;
-      return File;
-    }
+    TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
+    StringRef TestFilename = TestFilenameBuffer;
+    Expected<FileEntryRef> file = Files.getFileRef(TestFilename);
+    if (file)
+      return *file;
   }
 
-  // If the file is still not found, just go with the vanilla diagnostic
-  assert(!File.hasValue() && "expected missing file");
-  Diag(FilenameTok, diag::err_pp_file_not_found)
-      << OriginalFilename << FilenameRange;
-  if (IsFrameworkFound) {
-    size_t SlashPos = OriginalFilename.find('/');
-    assert(SlashPos != StringRef::npos &&
-           "Include with framework name should have '/' in the filename");
-    StringRef FrameworkName = OriginalFilename.substr(0, SlashPos);
-    FrameworkCacheEntry &CacheEntry =
-        HeaderInfo.LookupFrameworkCache(FrameworkName);
-    assert(CacheEntry.Directory && "Found framework should be in cache");
-    Diag(FilenameTok, diag::note_pp_framework_without_header)
-        << OriginalFilename.substr(SlashPos + 1) << FrameworkName
-        << CacheEntry.Directory->getName();
+  for (const std::string& EmbedPath : PPOpts->Embeds) {
+    TestFilenameBuffer.clear();
+    TestFilenameBuffer.insert(TestFilenameBuffer.end(), EmbedPath.begin(), EmbedPath.end());
+    const char& last = TestFilenameBuffer.back();
+    if (last != '\\' && last != '/') {
+      TestFilenameBuffer.push_back('/');
+    }
+    TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
+    StringRef TestFilename = TestFilenameBuffer;
+    Expected<FileEntryRef> file = Files.getFileRef(TestFilename);
+    if (file)
+      return *file;
   }
 
   return None;
@@ -2487,13 +2411,13 @@ void Preprocessor::HandleIncludeMacrosDirective(SourceLocation HashLoc,
 /// HandleEmbed - The "\#embed" token has been read
 void Preprocessor::HandleEmbed(SourceLocation HashLoc,
                                           Token &IncludeTok) {
-  HandleEmbedEither(HashLoc, IncludeTok, false, LookupFrom, LookupFromFile);
+  HandleEmbedEither(HashLoc, IncludeTok, false);
 }
 
 /// HandleEmbedStr - The "\#embed_str" token has been read
 void Preprocessor::HandleEmbedStr(SourceLocation HashLoc,
                                           Token &IncludeTok) {
-  HandleEmbedEither(HashLoc, IncludeTok, true, LookupFrom, LookupFromFile);
+  HandleEmbedEither(HashLoc, IncludeTok, true);
 }
 
 /// HandleEmbedEither - Shared code for "\#embed" or "\#embed_str"
@@ -2501,28 +2425,26 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
                                           Token &IncludeTok, bool Str) {
   if (!LangOpts.CPlusPlus && !LangOpts.C2x) {
     Diag(IncludeTok, diag::err_pp_invalid_directive);
-  }
-
-  Token FilenameTok;
-  llvm::Optional<size_t> MaybeLimit;
-  if (LexHeaderName(FilenameTok)) {
-    Token LimitTok;
-    LexNonComment(LimitTok);
-    if (LimitTok.isNot(tok::numeric_constant))
-      return;
-    if (LexHeaderName(FilenameTok))
-      return;
-    size_t Limit;
-    if (GetSizeNumeric(LimitTok, Limit, *this))
-      return;
-    MaybeLimit = Limit;
-  }
-
-  if (FilenameTok.isNot(tok::header_name)) {
-    Diag(FilenameTok.getLocation(), diag::err_pp_expects_filename);
-    if (FilenameTok.isNot(tok::eod))
-      DiscardUntilEndOfDirective();
+    DiscardUntilEndOfDirective();
     return;
+  }
+
+  llvm::Optional<size_t> MaybeLimit;
+  Token FilenameTok;
+  if (LexHeaderName(FilenameTok, true)) {
+    return;
+  }
+  if (FilenameTok.is(tok::numeric_constant)) {
+    size_t Limit;
+    if (GetSizeNumeric(FilenameTok, Limit, *this)) {
+      Diag(FilenameTok, diag::err_pp_expected_after) << "resource path or limit" << (Str ? "#embed_str" : "#embed");
+      DiscardUntilEndOfDirective();
+      return;
+    }
+    MaybeLimit = Limit;    
+    if (LexHeaderName(FilenameTok)) {
+      return;
+    } 
   }
 
   SmallString<128> FilenameBuffer;
@@ -2550,18 +2472,6 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       Filename = NewName;
   }
 
-  // Search include directories.
-  bool IsMapped = false;
-  bool IsFrameworkFound = false;
-  const DirectoryLookup *CurDir;
-  SmallString<1024> SearchPath;
-  SmallString<1024> RelativePath;
-  // We get the raw path only if we have 'Callbacks' to which we later pass
-  // the path.
-  ModuleMap::KnownHeader SuggestedModule;
-  SourceLocation FilenameLoc = FilenameTok.getLocation();
-  StringRef LookupFilename = Filename;
-
 #ifndef _WIN32
   // Normalize slashes when compiling with -fms-extensions on non-Windows. This
   // is unnecessary on Windows since the filesystem there handles backslashes.
@@ -2573,14 +2483,131 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
   }
 #endif
 
-  Optional<FileEntryRef> File = LookupEmbed(
-      CurDir, Filename, FilenameLoc, FilenameRange, FilenameTok,
-      IsFrameworkFound, IsMapped, LookupFrom, LookupFromFile,
-      LookupFilename, RelativePath, SearchPath, SuggestedModule, isAngled);
+  SourceLocation FilenameLoc = FilenameTok.getLocation();
+  Optional<FileEntryRef> MaybeFileRef = LookupEmbed(
+      Filename, FilenameLoc, FilenameRange, FilenameTok, isAngled);
 
-  if (!File || !File->)
+  if (!MaybeFileRef || !MaybeFileRef->isValid()) {
+    Diag(FilenameTok, diag::err_cannot_open_file) << Filename << "not found on embed path";
+    return;
+  }
+
+  FileEntryRef& File = *MaybeFileRef;
+  
+  SourceManager& Sources = getSourceManager();
+  FileManager& Files = Sources.getFileManager();
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeEmbedData = Files.getBufferForFile(File.getName());
+  if (!MaybeEmbedData) {
+    const std::error_code& err = MaybeEmbedData.getError();
+    Diag(FilenameTok, diag::err_cannot_open_file) << Filename << err.message();
+    DiscardUntilEndOfDirective();
+    return;
+  }
+  std::unique_ptr<llvm::MemoryBuffer>& PtrEmbedData = *MaybeEmbedData;
+  if (PtrEmbedData == nullptr) {
+    Diag(FilenameTok, diag::err_cannot_open_file) << Filename << "unable to read";
+    DiscardUntilEndOfDirective();
+    return;
+  }
 
   DiscardUntilEndOfDirective();
+  
+  llvm::MemoryBuffer& EmbedData = *PtrEmbedData;
+  size_t Limit = EmbedData.getBufferSize();
+  if (MaybeLimit) {
+    size_t MemLimit = *MaybeLimit;
+    if (MemLimit <= Limit) {
+      Limit = MemLimit;
+    }
+  }
+  StringRef EmbedDataRef(EmbedData.getBufferStart(), Limit);
+    
+  if (Str) {
+    // Format the string data...
+    size_t StringSize = EmbedDataRef.size() * 4 + 2;
+    std::unique_ptr<char[]> EmbedString = std::make_unique<char[]>(StringSize);
+    StringRef EmbedStringRef(EmbedString.get(), StringSize);
+    EmbedString[0] = '"';
+    for (size_t CurrentByte = 1; CurrentByte < StringSize; CurrentByte += 4) {
+      char* TargetBytes = EmbedString.get() + CurrentByte;
+      size_t TargetBytesSize = StringSize - CurrentByte;
+      unsigned UnsignedByte = static_cast<unsigned>(*(EmbedDataRef.bytes_begin() + CurrentByte));
+      int BytesWritten = snprintf(TargetBytes, TargetBytesSize, "\\x%02x", UnsignedByte);
+      (void)BytesWritten;
+      assert(BytesWritten == 4);
+    }
+    EmbedString[StringSize - 1] = '"';
+
+    size_t TokenCount = 1;
+    std::unique_ptr<Token[]> EmbedTokens = std::make_unique<Token[]>(TokenCount);
+    Token& StringToken = EmbedTokens[0];
+    StringToken.setKind(tok::string_literal);
+    CreateString(EmbedStringRef, StringToken, HashLoc, FilenameLoc);
+    
+    // dump into token stream
+    EnterTokenStream(std::move(EmbedTokens), TokenCount, true, false);
+  }
+  else {
+    static constexpr const char DecimalByteStrings[256][4] = {
+      {"0"},{"1"},{"2"},{"3"},{"4"},{"5"},{"6"},{"7"},{"8"},{"9"},{"10"},{"11"},{"12"},
+      {"13"},{"14"},{"15"},{"16"},{"17"},{"18"},{"19"},{"20"},{"21"},{"22"},{"23"},{"24"},
+      {"25"},{"26"},{"27"},{"28"},{"29"},{"30"},{"31"},{"32"},{"33"},{"34"},{"35"},{"36"},
+      {"37"},{"38"},{"39"},{"40"},{"41"},{"42"},{"43"},{"44"},{"45"},{"46"},{"47"},{"48"},
+      {"49"},{"50"},{"51"},{"52"},{"53"},{"54"},{"55"},{"56"},{"57"},{"58"},{"59"},{"60"},
+      {"61"},{"62"},{"63"},{"64"},{"65"},{"66"},{"67"},{"68"},{"69"},{"70"},{"71"},{"72"},
+      {"73"},{"74"},{"75"},{"76"},{"77"},{"78"},{"79"},{"80"},{"81"},{"82"},{"83"},{"84"},
+      {"85"},{"86"},{"87"},{"88"},{"89"},{"90"},{"91"},{"92"},{"93"},{"94"},{"95"},{"96"},
+      {"97"},{"98"},{"99"},{"100"},{"101"},{"102"},{"103"},{"104"},{"105"},{"106"},{"107"},
+      {"108"},{"109"},{"110"},{"111"},{"112"},{"113"},{"114"},{"115"},{"116"},{"117"},{"118"},
+      {"119"},{"120"},{"121"},{"122"},{"123"},{"124"},{"125"},{"126"},{"127"},{"128"},{"129"},
+      {"130"},{"131"},{"132"},{"133"},{"134"},{"135"},{"136"},{"137"},{"138"},{"139"},{"140"},
+      {"141"},{"142"},{"143"},{"144"},{"145"},{"146"},{"147"},{"148"},{"149"},{"150"},{"151"},
+      {"152"},{"153"},{"154"},{"155"},{"156"},{"157"},{"158"},{"159"},{"160"},{"161"},{"162"},
+      {"163"},{"164"},{"165"},{"166"},{"167"},{"168"},{"169"},{"170"},{"171"},{"172"},{"173"},
+      {"174"},{"175"},{"176"},{"177"},{"178"},{"179"},{"180"},{"181"},{"182"},{"183"},{"184"},
+      {"185"},{"186"},{"187"},{"188"},{"189"},{"190"},{"191"},{"192"},{"193"},{"194"},{"195"},
+      {"196"},{"197"},{"198"},{"199"},{"200"},{"201"},{"202"},{"203"},{"204"},{"205"},{"206"},
+      {"207"},{"208"},{"209"},{"210"},{"211"},{"212"},{"213"},{"214"},{"215"},{"216"},{"217"},
+      {"218"},{"219"},{"220"},{"221"},{"222"},{"223"},{"224"},{"225"},{"226"},{"227"},{"228"},
+      {"229"},{"230"},{"231"},{"232"},{"233"},{"234"},{"235"},{"236"},{"237"},{"238"},{"239"},
+      {"240"},{"241"},{"242"},{"243"},{"244"},{"245"},{"246"},{"247"},{"248"},{"249"},{"250"},
+      {"251"},{"252"},{"253"},{"254"},{"255"}
+    };
+    
+    size_t TokenCount = 1 + 1 + Limit + (Limit == 0 ? 0 : Limit - 1);
+    std::unique_ptr<Token[]> EmbedTokens = std::make_unique<Token[]>(TokenCount);
+    
+    Token& OpenBrace = EmbedTokens[0];
+    OpenBrace.setIdentifierInfo(nullptr);
+    OpenBrace.setKind(tok::TokenKind::l_brace);
+    OpenBrace.setLocation(FilenameLoc);
+    Token& CloseBrace = EmbedTokens[TokenCount - 1];
+    CloseBrace.setIdentifierInfo(nullptr);
+    CloseBrace.setKind(tok::TokenKind::r_brace);
+    CloseBrace.setLocation(FilenameLoc);
+    
+    for (size_t EmbedDataIndex = 0, TokenIndex = 1; EmbedDataIndex < Limit; ++EmbedDataIndex) {
+      if (EmbedDataIndex > 0) {
+        Token& Comma = EmbedTokens[TokenIndex];
+        Comma.setIdentifierInfo(nullptr);
+        Comma.setKind(tok::TokenKind::comma);
+        Comma.setLocation(HashLoc);
+        ++TokenIndex;
+      }
+      unsigned char ByteValue = EmbedDataRef.bytes_begin()[EmbedDataIndex];
+      assert(ByteValue < 256);
+      StringRef StringByteValue(DecimalByteStrings[ByteValue]);
+      Token& ByteLiteral = EmbedTokens[TokenIndex];
+      ByteLiteral.setIdentifierInfo(nullptr);
+      ByteLiteral.setKind(tok::TokenKind::numeric_constant);
+      ByteLiteral.setLiteralData(StringByteValue.data());
+      ByteLiteral.setLength(StringByteValue.size());
+      ByteLiteral.setLocation(FilenameLoc);
+      ++TokenIndex;
+    }
+    EnterTokenStream(std::move(EmbedTokens), TokenCount, true, false);
+  }
 }
 
 //===----------------------------------------------------------------------===//
