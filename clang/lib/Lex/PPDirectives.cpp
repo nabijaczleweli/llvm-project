@@ -2532,12 +2532,12 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
     
   if (Str) {
     static constexpr const char HexByteStringRepresentation[256][5] = {
-      "\\x00", "\\x01", "\\x02", "\\x03", "\\x04", "\\x05", "\\x06", "\\x07", "\\x08", "\\x09", "\\n", "\\v", "\\x0B", "\\r", "\\xE", "\\xF",
+      "\\0", "\\x1", "\\x2", "\\x3", "\\x4", "\\x5", "\\x6", "\\a", "\\x08", "\\t", "\\n", "\\v", "\\f", "\\r", "\\xE", "\\xF",
       "\\x10", "\\x11", "\\x12", "\\x13", "\\x14", "\\x15", "\\x16", "\\x17", "\\x18", "\\x19", "\\x1A", "\\x1B", "\\x1C", "\\x1D", "\\x1E", "\\x1F",
       " ", "!", "\\\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
       "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
       "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
-      "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_",
+      "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\\\", "]", "^", "_",
       "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
       "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", "\\x7F",
       "\\x80", "\\x81", "\\x82", "\\x83", "\\x84", "\\x85", "\\x86", "\\x87", "\\x88", "\\x89", "\\x8A", "\\x8B", "\\x8C", "\\x8D", "\\x8E", "\\x8F",
@@ -2550,19 +2550,31 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       "\\xF0", "\\xF1", "\\xF2", "\\xF3", "\\xF4", "\\xF5", "\\xF6", "\\xF7", "\\xF8", "\\xF9", "\\xFA", "\\xFB", "\\xFC", "\\xFD", "\\xFE", "\\xFF"
     };
 
+
     // Format the string data...
     size_t MaxEmbeddedStringSize = EmbedDataRef.size() * 4 + 2;
     std::unique_ptr<char[]> EmbeddedString = std::make_unique<char[]>(MaxEmbeddedStringSize);
     EmbeddedString[0] = '"';
     size_t CurrentStringIndex = 1;
+    bool PreviousWasHexEscape = false;
     for (size_t EmbedDataIndex = 0; EmbedDataIndex < EmbedDataRef.size(); ++EmbedDataIndex) {
       char* TargetBytes = EmbeddedString.get() + CurrentStringIndex;
       size_t TargetBytesSize = MaxEmbeddedStringSize - CurrentStringIndex;
       unsigned UnsignedByte = static_cast<unsigned>(EmbedBytesPtr[EmbedDataIndex]);
       assert(UnsignedByte < 256);
       StringRef UnsignedByteRepresentation(HexByteStringRepresentation[UnsignedByte]);
-      int BytesWritten = snprintf(TargetBytes, TargetBytesSize, "%s", UnsignedByteRepresentation.data());
-      assert(BytesWritten == static_cast<int>(UnsignedByteRepresentation.size()));
+
+      int BytesWritten = 0;
+      if(PreviousWasHexEscape && isxdigit(UnsignedByte)) {
+        // Invalid (three-character) or wrong (e.g. '\x1A' for "01 41" sequence) escapes will be generated otherwise
+        BytesWritten = snprintf(TargetBytes, TargetBytesSize, "\\x%x", UnsignedByte);
+        assert(BytesWritten == 4);
+        PreviousWasHexEscape = true;
+      } else {
+        BytesWritten = snprintf(TargetBytes, TargetBytesSize, "%s", UnsignedByteRepresentation.data());
+        assert(static_cast<unsigned>(BytesWritten) == UnsignedByteRepresentation.size());
+        PreviousWasHexEscape = UnsignedByteRepresentation.size() > 2 && UnsignedByteRepresentation[0] == '\\' && UnsignedByteRepresentation[1] == 'x';
+      }
       CurrentStringIndex += BytesWritten;
     }
     EmbeddedString[CurrentStringIndex] = '"';
