@@ -2410,19 +2410,19 @@ void Preprocessor::HandleIncludeMacrosDirective(SourceLocation HashLoc,
 
 /// HandleEmbed - The "\#embed" token has been read
 void Preprocessor::HandleEmbed(SourceLocation HashLoc,
-                                          Token &IncludeTok) {
+                               Token &IncludeTok) {
   HandleEmbedEither(HashLoc, IncludeTok, false);
 }
 
 /// HandleEmbedStr - The "\#embed_str" token has been read
 void Preprocessor::HandleEmbedStr(SourceLocation HashLoc,
-                                          Token &IncludeTok) {
+                                  Token &IncludeTok) {
   HandleEmbedEither(HashLoc, IncludeTok, true);
 }
 
 /// HandleEmbedEither - Shared code for "\#embed" or "\#embed_str"
 void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
-                                          Token &IncludeTok, bool Str) {
+                                     Token &IncludeTok, bool Str) {
   if (!LangOpts.CPlusPlus && !LangOpts.C2x) {
     Diag(IncludeTok, diag::err_pp_invalid_directive);
     DiscardUntilEndOfDirective();
@@ -2565,9 +2565,9 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       StringRef UnsignedByteRepresentation(HexByteStringRepresentation[UnsignedByte]);
 
       int BytesWritten = 0;
-      if(PreviousWasHexEscape && isxdigit(UnsignedByte)) {
+      if (PreviousWasHexEscape && isxdigit(UnsignedByte)) {
         // Invalid (three-character) or wrong (e.g. '\x1A' for "01 41" sequence) escapes will be generated otherwise
-        BytesWritten = snprintf(TargetBytes, TargetBytesSize, "\\x%x", UnsignedByte);
+        BytesWritten = snprintf(TargetBytes, TargetBytesSize, "\\x%02x", UnsignedByte);
         assert(BytesWritten == 4);
         PreviousWasHexEscape = true;
       } else {
