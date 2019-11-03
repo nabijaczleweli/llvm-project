@@ -2562,7 +2562,7 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       assert(UnsignedByte < 256);
       StringRef UnsignedByteRepresentation(HexByteStringRepresentation[UnsignedByte]);
       int BytesWritten = snprintf(TargetBytes, TargetBytesSize, "%s", UnsignedByteRepresentation.data());
-      assert(BytesWritten == UnsignedByteRepresentation.size());
+      assert(BytesWritten == static_cast<int>(UnsignedByteRepresentation.size()));
       CurrentStringIndex += BytesWritten;
     }
     EmbeddedString[CurrentStringIndex] = '"';
