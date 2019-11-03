@@ -10178,10 +10178,20 @@ static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCal
   }
   
   StringRef FileName(RawFileName.data(), FileNameSizeLimit);
+
+  llvm::Optional<int64_t> MaybeEmbedLimit = llvm::None;
+  if (pAPEmbedLimit != nullptr) {
+    if (pAPEmbedLimit->getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
+      Info.FFDiag(BuiltinCall, diag::err_integral_constant_too_large);
+      return false;
+    }
+    size_t EmbedLimit = static_cast<size_t>(pAPEmbedLimit->getZExtValue());
+    MaybeEmbedLimit = static_cast<int64_t>(EmbedLimit);
+  }
   
   // get to the file system
   FileManager& Files = Info.Ctx.getSourceManager().getFileManager();
-  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeFileData = Files.getBufferForFile(FileName);
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeFileData = Files.getBufferForFile(FileName, false, MaybeEmbedLimit);
   if (!MaybeFileData) {
     Info.FFDiag(FileNameArg, diag::err_cannot_open_file);
     return false;
@@ -10193,33 +10203,17 @@ static bool EvaluateBuiltinEmbedNWith(EvalInfo &Info, const CallExpr* BuiltinCal
     return false;
   }
 
-  size_t FileSize = static_cast<size_t>(FileData->getBufferSize());
-  size_t ReadSize = FileSize;
-  if (pAPEmbedLimit != nullptr) {
-    if (pAPEmbedLimit->getActiveBits() >= (sizeof(std::size_t) * CHAR_BIT)) {
-      Info.FFDiag(BuiltinCall, diag::err_integral_constant_too_large);
-      return false;
-    }
-    size_t EmbedLimit = static_cast<size_t>(pAPEmbedLimit->getZExtValue());
-    if (EmbedLimit > FileSize) {
-      ReadSize = FileSize;
-    }
-    else {
-      ReadSize = EmbedLimit;
-    }
-  }
-
   ASTContext& Context = Info.Ctx;
   QualType ReturnType = BuiltinCall->getCallReturnType(Context);
-  if (ReadSize < 1 || LOutPointer.isNullPointer()) {
+  if (FileData->getBufferSize() < 1 || LOutPointer.isNullPointer()) {
     // no data to read: just return the size
     APEmbedSize = APSInt(Context.getTypeSize(ReturnType), true);
-    APEmbedSize = ReadSize;
+    APEmbedSize = FileData->getBufferSize();
     return true;
   }
 
   // Get the StringRef we want to use
-  StringRef EmbedDataRef(FileData->getBufferStart(), ReadSize);
+  StringRef EmbedDataRef = FileData->getBuffer();
   // Size appropriately. Note that these functions return size in BITS,
   // not chars/bytes/whatever.
   QualType OutCharTy = OutPointerPointerArg->getType()->getPointeeType()->getPointeeType();

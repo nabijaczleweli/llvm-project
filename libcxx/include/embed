@@ -1,0 +1,71 @@
+// -*- C++ -*-
+//===---------------------------- deque -----------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef _LIBCPP_EMBED
+#define _LIBCPP_EMBED
+
+/*
+    embed synopsis
+
+namespace std {
+
+    template <typename T>
+        consteval span<const T> embed( string_view resource_identifier ) noexcept;
+
+    template <typename T>
+        consteval span<const T> embed( string_view resource_identifier, size_t limit ) noexcept;
+
+} // std
+
+*/
+
+#include <__config>
+#include <string_view>
+#include <cstddef>
+#include <span>
+#include <version>
+
+#if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
+#pragma GCC system_header
+#endif
+
+_LIBCPP_PUSH_MACROS
+#include <__undef_macros>
+
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+inline constexpr
+span<const char>
+inline embed (_VSTD string_view __resource_identifier) _NOEXCEPT 
+{
+    const char* __resource = nullptr;
+    _VSTD size_t __resource_size = 
+        __builtin_embed(__resource_identifier.data(), 
+                    __resource_identifier.size(), &__resource);
+    return { __resource, __resource_size };
+}
+
+inline constexpr
+span<const char>
+embed (_VSTD string_view __resource_identifier, _VSTD size_t __limit) _NOEXCEPT 
+{
+    const char* __resource = nullptr;
+    _VSTD size_t __resource_size = 
+        __builtin_embed(__resource_identifier.data(), 
+                    __resource_identifier.size(), &__resource, __limit);
+    return { __resource, __resource_size };
+}
+
+
+_LIBCPP_END_NAMESPACE_STD
+
+_LIBCPP_POP_MACROS
+
+#endif  // _LIBCPP_EMBED

@@ -2429,7 +2429,7 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
     return;
   }
 
-  llvm::Optional<size_t> MaybeLimit;
+  llvm::Optional<int64_t> MaybeLimit;
   Token FilenameTok;
   if (LexHeaderName(FilenameTok, true)) {
     return;
@@ -2441,7 +2441,12 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       DiscardUntilEndOfDirective();
       return;
     }
-    MaybeLimit = Limit;    
+    if (static_cast<uint64_t>(Limit) > static_cast<uint64_t>(INT64_MAX)) {
+      Diag(FilenameTok, diag::err_integral_constant_too_large);
+      DiscardUntilEndOfDirective();
+      return;
+    }
+    MaybeLimit = static_cast<int64_t>(Limit);
     if (LexHeaderName(FilenameTok)) {
       return;
     } 
@@ -2497,7 +2502,7 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
   SourceManager& Sources = getSourceManager();
   FileManager& Files = Sources.getFileManager();
 
-  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeEmbedData = Files.getBufferForFile(File.getName());
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> MaybeEmbedData = Files.getBufferForFile(File.getName(), false, MaybeLimit);
   if (!MaybeEmbedData) {
     const std::error_code& err = MaybeEmbedData.getError();
     Diag(FilenameTok, diag::err_cannot_open_file) << Filename << err.message();
@@ -2521,29 +2526,53 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
       Limit = MemLimit;
     }
   }
+  
   StringRef EmbedDataRef(EmbedData.getBufferStart(), Limit);
+  const unsigned char* EmbedBytesPtr = EmbedDataRef.bytes_begin();
     
   if (Str) {
+    static constexpr const char HexByteStringRepresentation[256][5] = {
+      "\\0", "\\x1", "\\x2", "\\x3", "\\x4", "\\x5", "\\x6", "\\a", "\\x08", "\\t", "\\n", "\\v", "\\f", "\\r", "\\xE", "\\xF",
+      "\\x10", "\\x11", "\\x12", "\\x13", "\\x14", "\\x15", "\\x16", "\\x17", "\\x18", "\\x19", "\\x1A", "\\x1B", "\\x1C", "\\x1D", "\\x1E", "\\x1F",
+      " ", "!", "\\\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
+      "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
+      "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+      "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_",
+      "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+      "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", "\\x7F",
+      "\\x80", "\\x81", "\\x82", "\\x83", "\\x84", "\\x85", "\\x86", "\\x87", "\\x88", "\\x89", "\\x8A", "\\x8B", "\\x8C", "\\x8D", "\\x8E", "\\x8F",
+      "\\x90", "\\x91", "\\x92", "\\x93", "\\x94", "\\x95", "\\x96", "\\x97", "\\x98", "\\x99", "\\x9A", "\\x9B", "\\x9C", "\\x9D", "\\x9E", "\\x9F",
+      "\\xA0", "\\xA1", "\\xA2", "\\xA3", "\\xA4", "\\xA5", "\\xA6", "\\xA7", "\\xA8", "\\xA9", "\\xAA", "\\xAB", "\\xAC", "\\xAD", "\\xAE", "\\xAF",
+      "\\xB0", "\\xB1", "\\xB2", "\\xB3", "\\xB4", "\\xB5", "\\xB6", "\\xB7", "\\xB8", "\\xB9", "\\xBA", "\\xBB", "\\xBC", "\\xBD", "\\xBE", "\\xBF",
+      "\\xC0", "\\xC1", "\\xC2", "\\xC3", "\\xC4", "\\xC5", "\\xC6", "\\xC7", "\\xC8", "\\xC9", "\\xCA", "\\xCB", "\\xCC", "\\xCD", "\\xCE", "\\xCF",
+      "\\xD0", "\\xD1", "\\xD2", "\\xD3", "\\xD4", "\\xD5", "\\xD6", "\\xD7", "\\xD8", "\\xD9", "\\xDA", "\\xDB", "\\xDC", "\\xDD", "\\xDE", "\\xDF",
+      "\\xE0", "\\xE1", "\\xE2", "\\xE3", "\\xE4", "\\xE5", "\\xE6", "\\xE7", "\\xE8", "\\xE9", "\\xEA", "\\xEB", "\\xEC", "\\xED", "\\xEE", "\\xEF",
+      "\\xF0", "\\xF1", "\\xF2", "\\xF3", "\\xF4", "\\xF5", "\\xF6", "\\xF7", "\\xF8", "\\xF9", "\\xFA", "\\xFB", "\\xFC", "\\xFD", "\\xFE", "\\xFF"
+    };
+
     // Format the string data...
-    size_t StringSize = EmbedDataRef.size() * 4 + 2;
-    std::unique_ptr<char[]> EmbedString = std::make_unique<char[]>(StringSize);
-    StringRef EmbedStringRef(EmbedString.get(), StringSize);
-    EmbedString[0] = '"';
-    for (size_t CurrentByte = 1; CurrentByte < StringSize; CurrentByte += 4) {
-      char* TargetBytes = EmbedString.get() + CurrentByte;
-      size_t TargetBytesSize = StringSize - CurrentByte;
-      unsigned UnsignedByte = static_cast<unsigned>(*(EmbedDataRef.bytes_begin() + CurrentByte));
-      int BytesWritten = snprintf(TargetBytes, TargetBytesSize, "\\x%02x", UnsignedByte);
-      (void)BytesWritten;
-      assert(BytesWritten == 4);
+    size_t MaxEmbeddedStringSize = EmbedDataRef.size() * 4 + 2;
+    std::unique_ptr<char[]> EmbeddedString = std::make_unique<char[]>(MaxEmbeddedStringSize);
+    EmbeddedString[0] = '"';
+    size_t CurrentStringIndex = 1;
+    for (size_t EmbedDataIndex = 0; EmbedDataIndex < EmbedDataRef.size(); ++EmbedDataIndex) {
+      char* TargetBytes = EmbeddedString.get() + CurrentStringIndex;
+      size_t TargetBytesSize = MaxEmbeddedStringSize - CurrentStringIndex;
+      unsigned UnsignedByte = static_cast<unsigned>(EmbedBytesPtr[EmbedDataIndex]);
+      assert(UnsignedByte < 256);
+      StringRef UnsignedByteRepresentation(HexByteStringRepresentation[UnsignedByte]);
+      int BytesWritten = snprintf(TargetBytes, TargetBytesSize, "%s", UnsignedByteRepresentation.data());
+      assert(BytesWritten == UnsignedByteRepresentation.size());
+      CurrentStringIndex += BytesWritten;
     }
-    EmbedString[StringSize - 1] = '"';
+    EmbeddedString[CurrentStringIndex] = '"';
+    ++CurrentStringIndex;
 
     size_t TokenCount = 1;
     std::unique_ptr<Token[]> EmbedTokens = std::make_unique<Token[]>(TokenCount);
     Token& StringToken = EmbedTokens[0];
     StringToken.setKind(tok::string_literal);
-    CreateString(EmbedStringRef, StringToken, HashLoc, FilenameLoc);
+    CreateString(StringRef(EmbeddedString.get(), CurrentStringIndex), StringToken, HashLoc, FilenameLoc);
     
     // dump into token stream
     EnterTokenStream(std::move(EmbedTokens), TokenCount, true, false);
@@ -2595,9 +2624,9 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
         Comma.setLocation(HashLoc);
         ++TokenIndex;
       }
-      unsigned char ByteValue = EmbedDataRef.bytes_begin()[EmbedDataIndex];
-      assert(ByteValue < 256);
-      StringRef StringByteValue(DecimalByteStrings[ByteValue]);
+      size_t ByteValueIndex = EmbedBytesPtr[EmbedDataIndex];
+      assert(ByteValueIndex < 256);
+      StringRef StringByteValue(DecimalByteStrings[ByteValueIndex]);
       Token& ByteLiteral = EmbedTokens[TokenIndex];
       ByteLiteral.setIdentifierInfo(nullptr);
       ByteLiteral.setKind(tok::TokenKind::numeric_constant);
