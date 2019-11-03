@@ -380,8 +380,8 @@ public:
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
   getBufferForFile(const FileEntry *Entry, bool isVolatile = false);
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
-  getBufferForFile(StringRef Filename, bool isVolatile = false) {
-    return getBufferForFileImpl(Filename, /*FileSize=*/-1, isVolatile);
+  getBufferForFile(StringRef Filename, bool isVolatile = false, llvm::Optional<int64_t> ReadLimit = llvm::None) {
+    return getBufferForFileImpl(Filename, ReadLimit.getValueOr(-1), isVolatile);
   }
 
 private:
