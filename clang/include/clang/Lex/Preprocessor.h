@@ -2217,7 +2217,9 @@ private:
 
   Optional<FileEntryRef> LookupEmbed(StringRef Filename,
       SourceLocation FilenameLoc, CharSourceRange FilenameRange,
-      const Token &FilenameTok, bool IsAngled);
+      const Token &FilenameTok, bool IsAngled, 
+      SmallVectorImpl<char> *RecoveryPath,
+      SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath);
 
   // File inclusion.
   void HandleIncludeDirective(SourceLocation HashLoc, Token &Tok,

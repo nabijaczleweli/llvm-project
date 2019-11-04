@@ -1892,10 +1892,17 @@ Optional<FileEntryRef> Preprocessor::LookupHeaderIncludeOrImport(
 
 Optional<FileEntryRef> Preprocessor::LookupEmbed(
     StringRef Filename, SourceLocation FilenameLoc, CharSourceRange FilenameRange,
-    const Token &FilenameTok, bool isAngled) {
+    const Token &FilenameTok, bool isAngled, SmallVectorImpl<char> *RecoveryPath,
+    SmallVectorImpl<char> &RelativePath, SmallVectorImpl<char> &SearchPath) {
 
   FileManager& Files = getFileManager();
-
+  StringRef Relative = llvm::sys::path::parent_path(Filename);
+  StringRef Search = llvm::sys::path::filename(Filename);
+  RelativePath.clear();
+  SearchPath.clear();
+  RelativePath.insert(RelativePath.begin(), Relative.begin(), Relative.end());
+  SearchPath.insert(SearchPath.begin(), Search.begin(), Search.end());
+  
   if (llvm::sys::path::is_absolute(Filename)) {
     llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(Filename));
     if (MaybeFile)
@@ -1904,6 +1911,21 @@ Optional<FileEntryRef> Preprocessor::LookupEmbed(
   }
 
   SmallString<128> TestFilenameBuffer;
+  if (RecoveryPath) {
+    if (!RecoveryPath->empty()) {
+      TestFilenameBuffer.insert(TestFilenameBuffer.end(), RecoveryPath->begin(), RecoveryPath->end());
+      const char& last = TestFilenameBuffer.back();
+      if (last != '\\' && last != '/') {
+        TestFilenameBuffer.push_back('/');
+      }
+    }
+    TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
+    StringRef TestFilename = TestFilenameBuffer;
+    llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(TestFilename));
+    if (MaybeFile)
+      return *MaybeFile;
+  }
+
   if (!isAngled) {
     SourceManager& Sources = getSourceManager();
     StringRef FromFilename = Sources.getFilename(FilenameLoc);
@@ -1917,6 +1939,7 @@ Optional<FileEntryRef> Preprocessor::LookupEmbed(
         }
       }
     }
+
     TestFilenameBuffer.insert(TestFilenameBuffer.end(), Filename.begin(), Filename.end());
     StringRef TestFilename = TestFilenameBuffer;
     llvm::ErrorOr<FileEntryRef> MaybeFile = llvm::expectedToErrorOr(Files.getFileRef(TestFilename));
@@ -2429,6 +2452,10 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
     return;
   }
 
+  if (!LangOpts.EmbedExtension) {
+    Diag(IncludeTok, diag::ext_pp_embed_directive);
+  }
+
   llvm::Optional<int64_t> MaybeLimit;
   Token FilenameTok;
   if (LexHeaderName(FilenameTok, true)) {
@@ -2489,16 +2516,35 @@ void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
 #endif
 
   SourceLocation FilenameLoc = FilenameTok.getLocation();
-  Optional<FileEntryRef> MaybeFileRef = LookupEmbed(
-      Filename, FilenameLoc, FilenameRange, FilenameTok, isAngled);
+  llvm::SmallString<128> SearchPath;
+  llvm::SmallString<128> RelativePath;
+  Optional<FileEntryRef> MaybeFileRef = LookupEmbed(Filename, FilenameLoc, FilenameRange, 
+    FilenameTok, isAngled, nullptr, SearchPath, RelativePath);
 
   if (!MaybeFileRef || !MaybeFileRef->isValid()) {
+    if (Callbacks) {
+      llvm::SmallString<128> RecoveryPath;
+      if (Callbacks->EmbedFileNotFound(Filename, RecoveryPath)) {
+        MaybeFileRef = LookupEmbed(RecoveryPath, FilenameLoc, FilenameRange, FilenameTok, 
+        isAngled, &RecoveryPath, RelativePath, SearchPath);
+      }
+    }
+  }
+
+  if (!MaybeFileRef || !MaybeFileRef->isValid()) {
+    if (Callbacks)
+      Callbacks->EmbedDirective(HashLoc, IncludeTok, Filename, isAngled, 
+        FilenameRange, nullptr, SearchPath, RelativePath);
     Diag(FilenameTok, diag::err_cannot_open_file) << Filename << "not found on embed path";
     return;
   }
 
   FileEntryRef& File = *MaybeFileRef;
   
+  if (Callbacks)
+    Callbacks->EmbedDirective(HashLoc, IncludeTok, Filename, isAngled, 
+      FilenameRange, &File.getFileEntry(), SearchPath, RelativePath);
+
   SourceManager& Sources = getSourceManager();
   FileManager& Files = Sources.getFileManager();
 

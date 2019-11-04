@@ -52,6 +52,12 @@ public:
                           const Module *Imported,
                           SrcMgr::CharacteristicKind FileType) override;
 
+  void EmbedDirective(SourceLocation HashLoc, const Token &IncludeTok,
+                          StringRef FileName, bool IsAngled,
+                          CharSourceRange FilenameRange, const FileEntry *File,
+                          StringRef SearchPath,
+                          StringRef RelativePath) override;
+
   void EndOfMainFile() override {
     OutputGraphFile();
   }
@@ -76,6 +82,30 @@ void DependencyGraphCallback::InclusionDirective(
     StringRef RelativePath,
     const Module *Imported,
     SrcMgr::CharacteristicKind FileType) {
+  if (!File)
+    return;
+
+  SourceManager &SM = PP->getSourceManager();
+  const FileEntry *FromFile
+    = SM.getFileEntryForID(SM.getFileID(SM.getExpansionLoc(HashLoc)));
+  if (!FromFile)
+    return;
+
+  Dependencies[FromFile].push_back(File);
+
+  AllFiles.insert(File);
+  AllFiles.insert(FromFile);
+}
+
+void DependencyGraphCallback::EmbedDirective(
+    SourceLocation HashLoc,
+    const Token &IncludeTok,
+    StringRef FileName,
+    bool IsAngled,
+    CharSourceRange FilenameRange,
+    const FileEntry *File,
+    StringRef SearchPath,
+    StringRef RelativePath) {
   if (!File)
     return;
 
