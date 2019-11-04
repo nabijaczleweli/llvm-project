@@ -554,6 +554,10 @@ def ftest_module_file_extension_EQ :
            "The argument is parsed as blockname:major:minor:hashed:user info">;
 def fconcepts_ts : Flag<["-"], "fconcepts-ts">,
   HelpText<"Enable C++ Extensions for Concepts.">;
+def fembed : Flag<["-"], "fembed">,
+  HelpText<"Enable #embed/#embed_str extension.">;
+def fno_embed : Flag<["-"], "fno-embed">,
+  HelpText<"Disable #embed/#embed_str extension.">;
 
 let Group = Action_Group in {
 

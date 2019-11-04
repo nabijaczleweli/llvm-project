@@ -370,6 +370,64 @@ public:
   /// \param IfLoc the source location of the \#if/\#ifdef/\#ifndef directive.
   virtual void Endif(SourceLocation Loc, SourceLocation IfLoc) {
   }
+
+  /// Callback invoked whenever an inclusion directive results in a
+  /// file-not-found error.
+  ///
+  /// \param FileName The name of the file being included, as written in the
+  /// source code.
+  ///
+  /// \param RecoveryPath If this client indicates that it can recover from
+  /// this missing file, the client should set this as an additional header
+  /// search patch.
+  ///
+  /// \returns true to indicate that the preprocessor should attempt to recover
+  /// by adding \p RecoveryPath as a header search path.
+  virtual bool EmbedFileNotFound(StringRef FileName,
+                            SmallVectorImpl<char> &RecoveryPath) {
+    return false;
+  }
+
+  /// Callback invoked whenever an embed directive has been processed.
+  ///
+  /// \param HashLoc The location of the '#' that starts the inclusion
+  /// directive.
+  ///
+  /// \param IncludeTok The token that indicates the kind of inclusion
+  /// directive, e.g., 'include' or 'import'.
+  ///
+  /// \param FileName The name of the file being included, as written in the
+  /// source code.
+  ///
+  /// \param IsAngled Whether the file name was enclosed in angle brackets;
+  /// otherwise, it was enclosed in quotes.
+  ///
+  /// \param FilenameRange The character range of the quotes or angle brackets
+  /// for the written file name.
+  ///
+  /// \param File The actual file that may be included by this inclusion
+  /// directive.
+  ///
+  /// \param SearchPath Contains the search path which was used to find the file
+  /// in the file system. If the file was found via an absolute include path,
+  /// SearchPath will be empty. For framework includes, the SearchPath and
+  /// RelativePath will be split up. For example, if an include of "Some/Some.h"
+  /// is found via the framework path
+  /// "path/to/Frameworks/Some.framework/Headers/Some.h", SearchPath will be
+  /// "path/to/Frameworks/Some.framework/Headers" and RelativePath will be
+  /// "Some.h".
+  ///
+  /// \param RelativePath The path relative to SearchPath, at which the include
+  /// file was found. This is equal to FileName except for framework includes.
+  ///
+  virtual void EmbedDirective(SourceLocation HashLoc,
+                              const Token &IncludeTok,
+                              StringRef FileName,
+                              bool IsAngled,
+                              CharSourceRange FilenameRange,
+                              const FileEntry *File,
+                              StringRef SearchPath,
+                              StringRef RelativePath) {}
 };
 
 /// Simple wrapper class for chaining callbacks.
@@ -605,6 +663,24 @@ public:
   void Endif(SourceLocation Loc, SourceLocation IfLoc) override {
     First->Endif(Loc, IfLoc);
     Second->Endif(Loc, IfLoc);
+  }
+
+  virtual bool EmbedFileNotFound(StringRef FileName,
+                            SmallVectorImpl<char> &RecoveryPath) {
+    return First->EmbedFileNotFound(FileName, RecoveryPath) ||
+      Second->EmbedFileNotFound(FileName, RecoveryPath);
+  }
+
+  virtual void EmbedDirective(SourceLocation HashLoc,
+                              const Token &IncludeTok,
+                              StringRef FileName,
+                              bool IsAngled,
+                              CharSourceRange FilenameRange,
+                              const FileEntry *File,
+                              StringRef SearchPath,
+                              StringRef RelativePath) {
+    First->EmbedDirective(HashLoc, IncludeTok, FileName, IsAngled, FilenameRange, File, SearchPath, RelativePath);
+    Second->EmbedDirective(HashLoc, IncludeTok, FileName, IsAngled, FilenameRange, File, SearchPath, RelativePath);
   }
 };
 
