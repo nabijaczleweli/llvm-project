@@ -2446,7 +2446,8 @@ void Preprocessor::HandleEmbedStr(SourceLocation HashLoc,
 /// HandleEmbedEither - Shared code for "\#embed" or "\#embed_str"
 void Preprocessor::HandleEmbedEither(SourceLocation HashLoc,
                                      Token &IncludeTok, bool Str) {
-  if (!LangOpts.CPlusPlus && !LangOpts.C2x) {
+  if (!LangOpts.CPlusPlus && !LangOpts.C99 && !LangOpts.C11 && !LangOpts.C17 &&
+      !LangOpts.C2x) {
     Diag(IncludeTok, diag::err_pp_invalid_directive);
     DiscardUntilEndOfDirective();
     return;
