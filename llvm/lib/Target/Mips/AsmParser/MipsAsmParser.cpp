@@ -339,7 +339,6 @@ class MipsAsmParser : public MCTargetAsmParser {
 
   bool parseMemOffset(const MCExpr *&Res, bool isParenExpr);
 
-  bool isEvaluated(const MCExpr *Expr);
   bool parseSetMips0Directive();
   bool parseSetArchDirective();
   bool parseSetFeature(uint64_t Feature);
@@ -560,6 +559,19 @@ public:
 
   bool isFP64bit() const {
     return getSTI().getFeatureBits()[Mips::FeatureFP64Bit];
+  }
+
+  bool isJalrRelocAvailable(const MCExpr *JalExpr) {
+    if (!EmitJalrReloc)
+      return false;
+    MCValue Res;
+    if (!JalExpr->evaluateAsRelocatable(Res, nullptr, nullptr))
+      return false;
+    if (Res.getSymB() != nullptr)
+      return false;
+    if (Res.getConstant() != 0)
+      return ABI.IsN32() || ABI.IsN64();
+    return true;
   }
 
   const MipsABIInfo &getABI() const { return ABI; }
@@ -1303,8 +1315,6 @@ public:
   }
 
   // Allow relocation operators.
-  // FIXME: This predicate and others need to look through binary expressions
-  //        and determine whether a Value is a constant or not.
   template <unsigned Bits, unsigned ShiftAmount = 0>
   bool isMemWithSimmOffset() const {
     if (!isMem())
@@ -1785,17 +1795,68 @@ static unsigned countMCSymbolRefExpr(const MCExpr *Expr) {
   return 0;
 }
 
+static bool isEvaluated(const MCExpr *Expr) {
+  switch (Expr->getKind()) {
+  case MCExpr::Constant:
+    return true;
+  case MCExpr::SymbolRef:
+    return (cast<MCSymbolRefExpr>(Expr)->getKind() != MCSymbolRefExpr::VK_None);
+  case MCExpr::Binary: {
+    const MCBinaryExpr *BE = cast<MCBinaryExpr>(Expr);
+    if (!isEvaluated(BE->getLHS()))
+      return false;
+    return isEvaluated(BE->getRHS());
+  }
+  case MCExpr::Unary:
+    return isEvaluated(cast<MCUnaryExpr>(Expr)->getSubExpr());
+  case MCExpr::Target:
+    return true;
+  }
+  return false;
+}
+
+static bool needsExpandMemInst(MCInst &Inst) {
+  const MCInstrDesc &MCID = getInstDesc(Inst.getOpcode());
+
+  unsigned NumOp = MCID.getNumOperands();
+  if (NumOp != 3 && NumOp != 4)
+    return false;
+
+  const MCOperandInfo &OpInfo = MCID.OpInfo[NumOp - 1];
+  if (OpInfo.OperandType != MCOI::OPERAND_MEMORY &&
+      OpInfo.OperandType != MCOI::OPERAND_UNKNOWN)
+    return false;
+
+  MCOperand &Op = Inst.getOperand(NumOp - 1);
+  if (Op.isImm()) {
+    // Offset can't exceed 16bit value.
+    return !isInt<16>(Op.getImm());
+  }
+
+  if (Op.isExpr()) {
+    const MCExpr *Expr = Op.getExpr();
+    if (Expr->getKind() != MCExpr::SymbolRef)
+      return !isEvaluated(Expr);
+
+    // Expand symbol.
+    const MCSymbolRefExpr *SR = static_cast<const MCSymbolRefExpr *>(Expr);
+    return SR->getKind() == MCSymbolRefExpr::VK_None;
+  }
+
+  return false;
+}
+
 bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
                                        MCStreamer &Out,
                                        const MCSubtargetInfo *STI) {
   MipsTargetStreamer &TOut = getTargetStreamer();
-  const MCInstrDesc &MCID = getInstDesc(Inst.getOpcode());
+  const unsigned Opcode = Inst.getOpcode();
+  const MCInstrDesc &MCID = getInstDesc(Opcode);
   bool ExpandedJalSym = false;
 
   Inst.setLoc(IDLoc);
 
   if (MCID.isBranch() || MCID.isCall()) {
-    const unsigned Opcode = Inst.getOpcode();
     MCOperand Offset;
 
     switch (Opcode) {
@@ -1909,14 +1970,13 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
 
   // SSNOP is deprecated on MIPS32r6/MIPS64r6
   // We still accept it but it is a normal nop.
-  if (hasMips32r6() && Inst.getOpcode() == Mips::SSNOP) {
+  if (hasMips32r6() && Opcode == Mips::SSNOP) {
     std::string ISA = hasMips64r6() ? "MIPS64r6" : "MIPS32r6";
     Warning(IDLoc, "ssnop is deprecated for " + ISA + " and is equivalent to a "
                                                       "nop instruction");
   }
 
   if (hasCnMips()) {
-    const unsigned Opcode = Inst.getOpcode();
     MCOperand Opnd;
     int Imm;
 
@@ -1966,7 +2026,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
   // not in the operands.
   unsigned FirstOp = 1;
   unsigned SecondOp = 2;
-  switch (Inst.getOpcode()) {
+  switch (Opcode) {
   default:
     break;
   case Mips::SDivIMacro:
@@ -2012,8 +2072,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
   }
 
   // For PIC code convert unconditional jump to unconditional branch.
-  if ((Inst.getOpcode() == Mips::J || Inst.getOpcode() == Mips::J_MM) &&
-      inPicMode()) {
+  if ((Opcode == Mips::J || Opcode == Mips::J_MM) && inPicMode()) {
     MCInst BInst;
     BInst.setOpcode(inMicroMipsMode() ? Mips::BEQ_MM : Mips::BEQ);
     BInst.addOperand(MCOperand::createReg(Mips::ZERO));
@@ -2024,8 +2083,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
 
   // This expansion is not in a function called by tryExpandInstruction()
   // because the pseudo-instruction doesn't have a distinct opcode.
-  if ((Inst.getOpcode() == Mips::JAL || Inst.getOpcode() == Mips::JAL_MM) &&
-      inPicMode()) {
+  if ((Opcode == Mips::JAL || Opcode == Mips::JAL_MM) && inPicMode()) {
     warnIfNoMacro(IDLoc);
 
     const MCExpr *JalExpr = Inst.getOperand(0).getExpr();
@@ -2039,8 +2097,6 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
     //        of the assembler. We ought to leave it to those later stages.
     const MCSymbol *JalSym = getSingleMCSymbol(JalExpr);
 
-    // FIXME: Add support for label+offset operands (currently causes an error).
-    // FIXME: Add support for forward-declared local symbols.
     if (expandLoadAddress(Mips::T9, Mips::NoRegister, Inst.getOperand(0),
                           !isGP64bit(), IDLoc, Out, STI))
       return true;
@@ -2053,7 +2109,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
     JalrInst.addOperand(MCOperand::createReg(Mips::RA));
     JalrInst.addOperand(MCOperand::createReg(Mips::T9));
 
-    if (EmitJalrReloc) {
+    if (isJalrRelocAvailable(JalExpr)) {
       // As an optimization hint for the linker, before the JALR we add:
       // .reloc tmplabel, R_{MICRO}MIPS_JALR, symbol
       // tmplabel:
@@ -2073,43 +2129,17 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
     ExpandedJalSym = true;
   }
 
-  bool IsPCRelativeLoad = (MCID.TSFlags & MipsII::IsPCRelativeLoad) != 0;
-  if ((MCID.mayLoad() || MCID.mayStore()) && !IsPCRelativeLoad) {
+  if (MCID.mayLoad() || MCID.mayStore()) {
     // Check the offset of memory operand, if it is a symbol
     // reference or immediate we may have to expand instructions.
-    for (unsigned i = 0; i < MCID.getNumOperands(); i++) {
-      const MCOperandInfo &OpInfo = MCID.OpInfo[i];
-      if ((OpInfo.OperandType == MCOI::OPERAND_MEMORY) ||
-          (OpInfo.OperandType == MCOI::OPERAND_UNKNOWN)) {
-        MCOperand &Op = Inst.getOperand(i);
-        if (Op.isImm()) {
-          int64_t MemOffset = Op.getImm();
-          if (MemOffset < -32768 || MemOffset > 32767) {
-            // Offset can't exceed 16bit value.
-            expandMemInst(Inst, IDLoc, Out, STI, MCID.mayLoad());
-            return getParser().hasPendingError();
-          }
-        } else if (Op.isExpr()) {
-          const MCExpr *Expr = Op.getExpr();
-          if (Expr->getKind() == MCExpr::SymbolRef) {
-            const MCSymbolRefExpr *SR =
-                static_cast<const MCSymbolRefExpr *>(Expr);
-            if (SR->getKind() == MCSymbolRefExpr::VK_None) {
-              // Expand symbol.
-              expandMemInst(Inst, IDLoc, Out, STI, MCID.mayLoad());
-              return getParser().hasPendingError();
-            }
-          } else if (!isEvaluated(Expr)) {
-            expandMemInst(Inst, IDLoc, Out, STI, MCID.mayLoad());
-            return getParser().hasPendingError();
-          }
-        }
-      }
-    } // for
-  }   // if load/store
+    if (needsExpandMemInst(Inst)) {
+      expandMemInst(Inst, IDLoc, Out, STI, MCID.mayLoad());
+      return getParser().hasPendingError();
+    }
+  }
 
   if (inMicroMipsMode()) {
-    if (MCID.mayLoad() && Inst.getOpcode() != Mips::LWP_MM) {
+    if (MCID.mayLoad() && Opcode != Mips::LWP_MM) {
       // Try to create 16-bit GP relative load instruction.
       for (unsigned i = 0; i < MCID.getNumOperands(); i++) {
         const MCOperandInfo &OpInfo = MCID.OpInfo[i];
@@ -2140,7 +2170,7 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
     MCOperand Opnd;
     int Imm;
 
-    switch (Inst.getOpcode()) {
+    switch (Opcode) {
       default:
         break;
       case Mips::ADDIUSP_MM:
@@ -2288,8 +2318,8 @@ bool MipsAsmParser::processInstruction(MCInst &Inst, SMLoc IDLoc,
     TOut.emitDirectiveSetReorder();
   }
 
-  if ((Inst.getOpcode() == Mips::JalOneReg ||
-       Inst.getOpcode() == Mips::JalTwoReg || ExpandedJalSym) &&
+  if ((Opcode == Mips::JalOneReg || Opcode == Mips::JalTwoReg ||
+       ExpandedJalSym) &&
       isPicAndNotNxxAbi()) {
     if (IsCpRestoreSet) {
       // We need a NOP between the JALR and the LW:
@@ -2807,13 +2837,9 @@ bool MipsAsmParser::expandLoadAddress(unsigned DstReg, unsigned BaseReg,
                                       const MCSubtargetInfo *STI) {
   // la can't produce a usable address when addresses are 64-bit.
   if (Is32BitAddress && ABI.ArePtrs64bit()) {
-    // FIXME: Demote this to a warning and continue as if we had 'dla' instead.
-    //        We currently can't do this because we depend on the equality
-    //        operator and N64 can end up with a GPR32/GPR64 mismatch.
-    Error(IDLoc, "la used to load 64-bit address");
+    Warning(IDLoc, "la used to load 64-bit address");
     // Continue as if we had 'dla' instead.
     Is32BitAddress = false;
-    return true;
   }
 
   // dla requires 64-bit addresses.
@@ -6091,26 +6117,6 @@ bool MipsAsmParser::parseOperand(OperandVector &Operands, StringRef Mnemonic) {
   }
   } // switch(getLexer().getKind())
   return true;
-}
-
-bool MipsAsmParser::isEvaluated(const MCExpr *Expr) {
-  switch (Expr->getKind()) {
-  case MCExpr::Constant:
-    return true;
-  case MCExpr::SymbolRef:
-    return (cast<MCSymbolRefExpr>(Expr)->getKind() != MCSymbolRefExpr::VK_None);
-  case MCExpr::Binary: {
-    const MCBinaryExpr *BE = cast<MCBinaryExpr>(Expr);
-    if (!isEvaluated(BE->getLHS()))
-      return false;
-    return isEvaluated(BE->getRHS());
-  }
-  case MCExpr::Unary:
-    return isEvaluated(cast<MCUnaryExpr>(Expr)->getSubExpr());
-  case MCExpr::Target:
-    return true;
-  }
-  return false;
 }
 
 bool MipsAsmParser::ParseRegister(unsigned &RegNo, SMLoc &StartLoc,

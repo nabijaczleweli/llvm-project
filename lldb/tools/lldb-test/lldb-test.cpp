@@ -529,7 +529,7 @@ Error opts::symbols::findTypes(lldb_private::Module &Module) {
     Symfile.FindTypes(ConstString(Name), ContextPtr, UINT32_MAX, SearchedFiles,
                       Map);
   else
-    Module.FindTypes(parseCompilerContext(), languages, Map);
+    Module.FindTypes(parseCompilerContext(), languages, SearchedFiles, Map);
 
   outs() << formatv("Found {0} types:\n", Map.GetSize());
   StreamString Stream;
@@ -623,7 +623,7 @@ Error opts::symbols::dumpClangAST(lldb_private::Module &Module) {
     return make_string_error("Module has no symbol file.");
 
   llvm::Expected<TypeSystem &> type_system_or_err =
-      symfile->GetTypeSystemForLanguage(eLanguageTypeC_plus_plus);
+      symfile->GetTypeSystemForLanguage(eLanguageTypeObjC_plus_plus);
   if (!type_system_or_err)
     return make_string_error("Can't retrieve ClangASTContext");
 

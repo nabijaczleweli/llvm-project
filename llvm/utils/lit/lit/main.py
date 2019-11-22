@@ -43,6 +43,9 @@ def main(builtin_params = {}):
         echo_all_commands = opts.echoAllCommands)
 
     tests = lit.discovery.find_tests_for_inputs(litConfig, opts.test_paths)
+    if not tests:
+        sys.stderr.write('Did not disover any tests for provided path(s).\n')
+        sys.exit(2)
 
     # Command line overrides configuration for maxIndividualTestTime.
     if opts.maxIndividualTestTime is not None:  # `not None` is important (default: 0)
@@ -63,12 +66,27 @@ def main(builtin_params = {}):
 
     if opts.filter:
         tests = [t for t in tests if opts.filter.search(t.getFullName())]
+        if not tests:
+            sys.stderr.write('Filter did not match any tests '
+                             '(of %d discovered).  ' % numTotalTests)
+            if opts.allow_empty_runs:
+                sys.stderr.write('Suppressing error because '
+                                 "'--allow-empty-runs' was specified.\n")
+                sys.exit(0)
+            else:
+                sys.stderr.write("Use '--allow-empty-runs' to suppress this "
+                                 'error.\n')
+                sys.exit(2)
 
     determine_order(tests, opts.order)
 
     if opts.shard:
         (run, shards) = opts.shard
         tests = filter_by_shard(tests, run, shards, litConfig)
+        if not tests:
+            sys.stderr.write('Shard does not contain any tests.  Consider '
+                             'decreasing the number of shards.\n')
+            sys.exit(0)
 
     if opts.max_tests:
         tests = tests[:opts.max_tests]
@@ -79,7 +97,9 @@ def main(builtin_params = {}):
     run_tests(tests, litConfig, opts, numTotalTests)
     elapsed = time.time() - start
 
-    print_summary(tests, elapsed, opts)
+    executed_tests = [t for t in tests if t.result]
+
+    print_summary(executed_tests, elapsed, opts)
 
     if opts.output_path:
         write_test_results(tests, litConfig, elapsed, opts.output_path)
@@ -87,13 +107,13 @@ def main(builtin_params = {}):
         write_test_results_xunit(tests, opts)
 
     if litConfig.numErrors:
-        sys.stderr.write('\n%d error(s), exiting.\n' % litConfig.numErrors)
+        sys.stderr.write('\n%d error(s) in tests.\n' % litConfig.numErrors)
         sys.exit(2)
 
     if litConfig.numWarnings:
         sys.stderr.write('\n%d warning(s) in tests.\n' % litConfig.numWarnings)
 
-    has_failure = any(t.isFailure() for t in tests)
+    has_failure = any(t.isFailure() for t in executed_tests)
     if has_failure:
         sys.exit(1)
 
@@ -185,16 +205,10 @@ def run_tests(tests, litConfig, opts, numTotalTests):
     display.print_header()
     try:
         execute_in_tmp_dir(run, litConfig)
+        display.clear(interrupted=False)
     except KeyboardInterrupt:
-        #TODO(yln): should we attempt to cleanup the progress bar here?
-        sys.exit(2)
-    # TODO(yln): display.finish_interrupted(), which shows the most recently started test
-    # TODO(yln): change display to update when test starts, not when test completes
-    # Ensure everything still works with SimpleProgressBar as well
-    # finally:
-    #     display.clear()
-
-    display.clear()
+        display.clear(interrupted=True)
+        print(' [interrupted by user]')
 
 def execute_in_tmp_dir(run, litConfig):
     # Create a temp directory inside the normal temp directory so that we can
@@ -229,7 +243,7 @@ def execute_in_tmp_dir(run, litConfig):
 
 def print_summary(tests, elapsed, opts):
     if not opts.quiet:
-        print('Testing Time: %.2fs' % elapsed)
+        print('\nTesting Time: %.2fs' % elapsed)
 
     byCode = {}
     for test in tests:
@@ -278,6 +292,7 @@ def print_summary(tests, elapsed, opts):
             print('  %s: %d' % (name,N))
 
 def write_test_results(tests, lit_config, elapsed, output_path):
+    # TODO(yln): audit: unexecuted tests
     # Construct the data we will write.
     data = {}
     # Encode the current lit version as a schema version.
@@ -332,6 +347,7 @@ def write_test_results(tests, lit_config, elapsed, output_path):
         f.close()
 
 def write_test_results_xunit(tests, opts):
+    # TODO(yln): audit: unexecuted tests
     from xml.sax.saxutils import quoteattr
     # Collect the tests, indexed by test suite
     by_suite = {}

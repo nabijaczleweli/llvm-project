@@ -1536,6 +1536,7 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
           return ExprError();
         break;
       case llvm::Triple::aarch64:
+      case llvm::Triple::aarch64_32:
       case llvm::Triple::aarch64_be:
         if (CheckAArch64BuiltinFunctionCall(BuiltinID, TheCall))
           return ExprError();
@@ -1685,6 +1686,7 @@ bool Sema::CheckNeonBuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall) {
 
     llvm::Triple::ArchType Arch = Context.getTargetInfo().getTriple().getArch();
     bool IsPolyUnsigned = Arch == llvm::Triple::aarch64 ||
+                          Arch == llvm::Triple::aarch64_32 ||
                           Arch == llvm::Triple::aarch64_be;
     bool IsInt64Long =
         Context.getTargetInfo().getInt64Type() == TargetInfo::SignedLong;
@@ -4570,20 +4572,19 @@ ExprResult Sema::BuildAtomicExpr(SourceRange CallRange, SourceRange ExprRange,
       && sizeof(NumVals)/sizeof(NumVals[0]) == NumForm,
       "need to update code for modified forms");
   static_assert(AtomicExpr::AO__c11_atomic_init == 0 &&
-                    AtomicExpr::AO__c11_atomic_fetch_xor + 1 ==
+                    AtomicExpr::AO__c11_atomic_fetch_min + 1 ==
                         AtomicExpr::AO__atomic_load,
                 "need to update code for modified C11 atomics");
   bool IsOpenCL = Op >= AtomicExpr::AO__opencl_atomic_init &&
                   Op <= AtomicExpr::AO__opencl_atomic_fetch_max;
   bool IsC11 = (Op >= AtomicExpr::AO__c11_atomic_init &&
-               Op <= AtomicExpr::AO__c11_atomic_fetch_xor) ||
+               Op <= AtomicExpr::AO__c11_atomic_fetch_min) ||
                IsOpenCL;
   bool IsN = Op == AtomicExpr::AO__atomic_load_n ||
              Op == AtomicExpr::AO__atomic_store_n ||
              Op == AtomicExpr::AO__atomic_exchange_n ||
              Op == AtomicExpr::AO__atomic_compare_exchange_n;
   bool IsAddSub = false;
-  bool IsMinMax = false;
 
   switch (Op) {
   case AtomicExpr::AO__c11_atomic_init:
@@ -4634,12 +4635,12 @@ ExprResult Sema::BuildAtomicExpr(SourceRange CallRange, SourceRange ExprRange,
   case AtomicExpr::AO__atomic_or_fetch:
   case AtomicExpr::AO__atomic_xor_fetch:
   case AtomicExpr::AO__atomic_nand_fetch:
-    Form = Arithmetic;
-    break;
-
+  case AtomicExpr::AO__c11_atomic_fetch_min:
+  case AtomicExpr::AO__c11_atomic_fetch_max:
+  case AtomicExpr::AO__atomic_min_fetch:
+  case AtomicExpr::AO__atomic_max_fetch:
   case AtomicExpr::AO__atomic_fetch_min:
   case AtomicExpr::AO__atomic_fetch_max:
-    IsMinMax = true;
     Form = Arithmetic;
     break;
 
@@ -4731,16 +4732,8 @@ ExprResult Sema::BuildAtomicExpr(SourceRange CallRange, SourceRange ExprRange,
           << IsC11 << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
-    if (IsMinMax) {
-      const BuiltinType *BT = ValType->getAs<BuiltinType>();
-      if (!BT || (BT->getKind() != BuiltinType::Int &&
-                  BT->getKind() != BuiltinType::UInt)) {
-        Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_int32_or_ptr);
-        return ExprError();
-      }
-    }
-    if (!IsAddSub && !IsMinMax && !ValType->isIntegerType()) {
-      Diag(ExprRange.getBegin(), diag::err_atomic_op_bitwise_needs_atomic_int)
+    if (!IsAddSub && !ValType->isIntegerType()) {
+      Diag(ExprRange.getBegin(), diag::err_atomic_op_needs_atomic_int)
           << IsC11 << Ptr->getType() << Ptr->getSourceRange();
       return ExprError();
     }
@@ -5516,7 +5509,8 @@ ExprResult Sema::CheckOSLogFormatStringArg(Expr *Arg) {
 static bool checkVAStartABI(Sema &S, unsigned BuiltinID, Expr *Fn) {
   const llvm::Triple &TT = S.Context.getTargetInfo().getTriple();
   bool IsX64 = TT.getArch() == llvm::Triple::x86_64;
-  bool IsAArch64 = TT.getArch() == llvm::Triple::aarch64;
+  bool IsAArch64 = (TT.getArch() == llvm::Triple::aarch64 ||
+                    TT.getArch() == llvm::Triple::aarch64_32);
   bool IsWindows = TT.isOSWindows();
   bool IsMSVAStart = BuiltinID == Builtin::BI__builtin_ms_va_start;
   if (IsX64 || IsAArch64) {
@@ -9267,7 +9261,7 @@ void Sema::CheckMaxUnsignedZero(const CallExpr *Call,
   auto IsLiteralZeroArg = [](const Expr* E) -> bool {
     const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E);
     if (!MTE) return false;
-    const auto *Num = dyn_cast<IntegerLiteral>(MTE->GetTemporaryExpr());
+    const auto *Num = dyn_cast<IntegerLiteral>(MTE->getSubExpr());
     if (!Num) return false;
     if (Num->getValue() != 0) return false;
     return true;
@@ -11842,7 +11836,7 @@ static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
     return;
 
   if (isObjCSignedCharBool(S, T) && !Source->isCharType() &&
-      !E->isKnownToHaveBooleanValue()) {
+      !E->isKnownToHaveBooleanValue(/*Semantic=*/false)) {
     return adornObjCBoolConversionDiagWithTernaryFixit(
         S, E,
         S.Diag(CC, diag::warn_impcast_int_to_objc_signed_char_bool)

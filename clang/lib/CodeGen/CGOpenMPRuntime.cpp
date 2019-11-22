@@ -20,6 +20,7 @@
 #include "clang/AST/StmtOpenMP.h"
 #include "clang/Basic/BitmaskEnum.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SetOperations.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -3008,9 +3009,9 @@ Address CGOpenMPRuntime::getAddrOfArtificialThreadPrivate(CodeGenFunction &CGF,
       CGM.getPointerAlign());
 }
 
-void CGOpenMPRuntime::emitOMPIfClause(CodeGenFunction &CGF, const Expr *Cond,
-                                      const RegionCodeGenTy &ThenGen,
-                                      const RegionCodeGenTy &ElseGen) {
+void CGOpenMPRuntime::emitIfClause(CodeGenFunction &CGF, const Expr *Cond,
+                                   const RegionCodeGenTy &ThenGen,
+                                   const RegionCodeGenTy &ElseGen) {
   CodeGenFunction::LexicalScope ConditionScope(CGF, Cond->getSourceRange());
 
   // If the condition constant folds and can be elided, try to avoid emitting
@@ -3100,7 +3101,7 @@ void CGOpenMPRuntime::emitParallelCall(CodeGenFunction &CGF, SourceLocation Loc,
         EndArgs);
   };
   if (IfCond) {
-    emitOMPIfClause(CGF, IfCond, ThenGen, ElseGen);
+    emitIfClause(CGF, IfCond, ThenGen, ElseGen);
   } else {
     RegionCodeGenTy ThenRCG(ThenGen);
     ThenRCG(CGF);
@@ -3616,7 +3617,9 @@ static int addMonoNonMonoModifier(CodeGenModule &CGM, OpenMPSchedType Schedule,
   if (CGM.getLangOpts().OpenMP >= 50 && Modifier == 0) {
     if (!(Schedule == OMP_sch_static_chunked || Schedule == OMP_sch_static ||
           Schedule == OMP_sch_static_balanced_chunked ||
-          Schedule == OMP_ord_static_chunked || Schedule == OMP_ord_static))
+          Schedule == OMP_ord_static_chunked || Schedule == OMP_ord_static ||
+          Schedule == OMP_dist_sch_static_chunked ||
+          Schedule == OMP_dist_sch_static))
       Modifier = OMP_sch_modifier_nonmonotonic;
   }
   return Schedule | Modifier;
@@ -5366,7 +5369,7 @@ void CGOpenMPRuntime::emitTaskCall(CodeGenFunction &CGF, SourceLocation Loc,
   };
 
   if (IfCond) {
-    emitOMPIfClause(CGF, IfCond, ThenCodeGen, ElseCodeGen);
+    emitIfClause(CGF, IfCond, ThenCodeGen, ElseCodeGen);
   } else {
     RegionCodeGenTy ThenRCG(ThenCodeGen);
     ThenRCG(CGF);
@@ -6449,8 +6452,8 @@ void CGOpenMPRuntime::emitCancelCall(CodeGenFunction &CGF, SourceLocation Loc,
       CGF.EmitBlock(ContBB, /*IsFinished=*/true);
     };
     if (IfCond) {
-      emitOMPIfClause(CGF, IfCond, ThenGen,
-                      [](CodeGenFunction &, PrePostActionTy &) {});
+      emitIfClause(CGF, IfCond, ThenGen,
+                   [](CodeGenFunction &, PrePostActionTy &) {});
     } else {
       RegionCodeGenTy ThenRCG(ThenGen);
       ThenRCG(CGF);
@@ -7940,17 +7943,17 @@ public:
            "Expect a executable directive");
     const auto *CurExecDir = CurDir.get<const OMPExecutableDirective *>();
     for (const auto *C : CurExecDir->getClausesOfKind<OMPMapClause>())
-      for (const auto &L : C->component_lists()) {
+      for (const auto L : C->component_lists()) {
         InfoGen(L.first, L.second, C->getMapType(), C->getMapTypeModifiers(),
             /*ReturnDevicePointer=*/false, C->isImplicit());
       }
     for (const auto *C : CurExecDir->getClausesOfKind<OMPToClause>())
-      for (const auto &L : C->component_lists()) {
+      for (const auto L : C->component_lists()) {
         InfoGen(L.first, L.second, OMPC_MAP_to, llvm::None,
             /*ReturnDevicePointer=*/false, C->isImplicit());
       }
     for (const auto *C : CurExecDir->getClausesOfKind<OMPFromClause>())
-      for (const auto &L : C->component_lists()) {
+      for (const auto L : C->component_lists()) {
         InfoGen(L.first, L.second, OMPC_MAP_from, llvm::None,
             /*ReturnDevicePointer=*/false, C->isImplicit());
       }
@@ -7966,7 +7969,7 @@ public:
 
     for (const auto *C :
          CurExecDir->getClausesOfKind<OMPUseDevicePtrClause>()) {
-      for (const auto &L : C->component_lists()) {
+      for (const auto L : C->component_lists()) {
         assert(!L.second.empty() && "Not expecting empty list of components!");
         const ValueDecl *VD = L.second.back().getAssociatedDeclaration();
         VD = cast<ValueDecl>(VD->getCanonicalDecl());
@@ -8119,7 +8122,7 @@ public:
 
     for (const auto *C : CurMapperDir->clauselists()) {
       const auto *MC = cast<OMPMapClause>(C);
-      for (const auto &L : MC->component_lists()) {
+      for (const auto L : MC->component_lists()) {
         InfoGen(L.first, L.second, MC->getMapType(), MC->getMapTypeModifiers(),
                 /*ReturnDevicePointer=*/false, MC->isImplicit());
       }
@@ -8288,7 +8291,7 @@ public:
            "Expect a executable directive");
     const auto *CurExecDir = CurDir.get<const OMPExecutableDirective *>();
     for (const auto *C : CurExecDir->getClausesOfKind<OMPMapClause>()) {
-      for (const auto &L : C->decl_component_lists(VD)) {
+      for (const auto L : C->decl_component_lists(VD)) {
         assert(L.first == VD &&
                "We got information for the wrong declaration??");
         assert(!L.second.empty() &&
@@ -8441,7 +8444,7 @@ public:
     // Map other list items in the map clause which are not captured variables
     // but "declare target link" global variables.
     for (const auto *C : CurExecDir->getClausesOfKind<OMPMapClause>()) {
-      for (const auto &L : C->component_lists()) {
+      for (const auto L : C->component_lists()) {
         if (!L.first)
           continue;
         const auto *VD = dyn_cast<VarDecl>(L.first);
@@ -9426,7 +9429,7 @@ void CGOpenMPRuntime::emitTargetCall(
   // specify target triples.
   if (OutlinedFnID) {
     if (IfCond) {
-      emitOMPIfClause(CGF, IfCond, TargetThenGen, TargetElseGen);
+      emitIfClause(CGF, IfCond, TargetThenGen, TargetElseGen);
     } else {
       RegionCodeGenTy ThenRCG(TargetThenGen);
       ThenRCG(CGF);
@@ -10054,7 +10057,7 @@ void CGOpenMPRuntime::emitTargetDataCalls(
   auto &&EndElseGen = [](CodeGenFunction &CGF, PrePostActionTy &) {};
 
   if (IfCond) {
-    emitOMPIfClause(CGF, IfCond, BeginThenGen, BeginElseGen);
+    emitIfClause(CGF, IfCond, BeginThenGen, BeginElseGen);
   } else {
     RegionCodeGenTy RCG(BeginThenGen);
     RCG(CGF);
@@ -10068,7 +10071,7 @@ void CGOpenMPRuntime::emitTargetDataCalls(
   }
 
   if (IfCond) {
-    emitOMPIfClause(CGF, IfCond, EndThenGen, EndElseGen);
+    emitIfClause(CGF, IfCond, EndThenGen, EndElseGen);
   } else {
     RegionCodeGenTy RCG(EndThenGen);
     RCG(CGF);
@@ -10225,8 +10228,8 @@ void CGOpenMPRuntime::emitTargetDataStandAloneCall(
   };
 
   if (IfCond) {
-    emitOMPIfClause(CGF, IfCond, TargetThenGen,
-                    [](CodeGenFunction &CGF, PrePostActionTy &) {});
+    emitIfClause(CGF, IfCond, TargetThenGen,
+                 [](CodeGenFunction &CGF, PrePostActionTy &) {});
   } else {
     RegionCodeGenTy ThenRCG(TargetThenGen);
     ThenRCG(CGF);
@@ -11023,12 +11026,18 @@ Address CGOpenMPRuntime::getAddressOfLocalVariable(CodeGenFunction &CGF,
   return Address(Addr, Align);
 }
 
+namespace {
+using OMPContextSelectorData =
+    OpenMPCtxSelectorData<ArrayRef<StringRef>, llvm::APSInt>;
+using CompleteOMPContextSelectorData = SmallVector<OMPContextSelectorData, 4>;
+} // anonymous namespace
+
 /// Checks current context and returns true if it matches the context selector.
-template <OMPDeclareVariantAttr::CtxSelectorSetType CtxSet,
-          OMPDeclareVariantAttr::CtxSelectorType Ctx>
-static bool checkContext(const OMPDeclareVariantAttr *A) {
-  assert(CtxSet != OMPDeclareVariantAttr::CtxSetUnknown &&
-         Ctx != OMPDeclareVariantAttr::CtxUnknown &&
+template <OpenMPContextSelectorSetKind CtxSet, OpenMPContextSelectorKind Ctx,
+          typename... Arguments>
+static bool checkContext(const OMPContextSelectorData &Data,
+                         Arguments... Params) {
+  assert(Data.CtxSet != OMP_CTX_SET_unknown && Data.Ctx != OMP_CTX_unknown &&
          "Unknown context selector or context selector set.");
   return false;
 }
@@ -11036,53 +11045,232 @@ static bool checkContext(const OMPDeclareVariantAttr *A) {
 /// Checks for implementation={vendor(<vendor>)} context selector.
 /// \returns true iff <vendor>="llvm", false otherwise.
 template <>
-bool checkContext<OMPDeclareVariantAttr::CtxSetImplementation,
-                  OMPDeclareVariantAttr::CtxVendor>(
-    const OMPDeclareVariantAttr *A) {
-  return llvm::all_of(A->implVendors(),
+bool checkContext<OMP_CTX_SET_implementation, OMP_CTX_vendor>(
+    const OMPContextSelectorData &Data) {
+  return llvm::all_of(Data.Names,
                       [](StringRef S) { return !S.compare_lower("llvm"); });
 }
 
-static bool greaterCtxScore(ASTContext &Ctx, const Expr *LHS, const Expr *RHS) {
-  llvm::APSInt LHSVal = LHS->EvaluateKnownConstInt(Ctx);
-  llvm::APSInt RHSVal = RHS->EvaluateKnownConstInt(Ctx);
-  return llvm::APSInt::compareValues(LHSVal, RHSVal) >= 0;
+/// Checks for device={kind(<kind>)} context selector.
+/// \returns true if <kind>="host" and compilation is for host.
+/// true if <kind>="nohost" and compilation is for device.
+/// true if <kind>="cpu" and compilation is for Arm, X86 or PPC CPU.
+/// true if <kind>="gpu" and compilation is for NVPTX or AMDGCN.
+/// false otherwise.
+template <>
+bool checkContext<OMP_CTX_SET_device, OMP_CTX_kind, CodeGenModule &>(
+    const OMPContextSelectorData &Data, CodeGenModule &CGM) {
+  for (StringRef Name : Data.Names) {
+    if (!Name.compare_lower("host")) {
+      if (CGM.getLangOpts().OpenMPIsDevice)
+        return false;
+      continue;
+    }
+    if (!Name.compare_lower("nohost")) {
+      if (!CGM.getLangOpts().OpenMPIsDevice)
+        return false;
+      continue;
+    }
+    switch (CGM.getTriple().getArch()) {
+    case llvm::Triple::arm:
+    case llvm::Triple::armeb:
+    case llvm::Triple::aarch64:
+    case llvm::Triple::aarch64_be:
+    case llvm::Triple::aarch64_32:
+    case llvm::Triple::ppc:
+    case llvm::Triple::ppc64:
+    case llvm::Triple::ppc64le:
+    case llvm::Triple::x86:
+    case llvm::Triple::x86_64:
+      if (Name.compare_lower("cpu"))
+        return false;
+      break;
+    case llvm::Triple::amdgcn:
+    case llvm::Triple::nvptx:
+    case llvm::Triple::nvptx64:
+      if (Name.compare_lower("gpu"))
+        return false;
+      break;
+    case llvm::Triple::UnknownArch:
+    case llvm::Triple::arc:
+    case llvm::Triple::avr:
+    case llvm::Triple::bpfel:
+    case llvm::Triple::bpfeb:
+    case llvm::Triple::hexagon:
+    case llvm::Triple::mips:
+    case llvm::Triple::mipsel:
+    case llvm::Triple::mips64:
+    case llvm::Triple::mips64el:
+    case llvm::Triple::msp430:
+    case llvm::Triple::r600:
+    case llvm::Triple::riscv32:
+    case llvm::Triple::riscv64:
+    case llvm::Triple::sparc:
+    case llvm::Triple::sparcv9:
+    case llvm::Triple::sparcel:
+    case llvm::Triple::systemz:
+    case llvm::Triple::tce:
+    case llvm::Triple::tcele:
+    case llvm::Triple::thumb:
+    case llvm::Triple::thumbeb:
+    case llvm::Triple::xcore:
+    case llvm::Triple::le32:
+    case llvm::Triple::le64:
+    case llvm::Triple::amdil:
+    case llvm::Triple::amdil64:
+    case llvm::Triple::hsail:
+    case llvm::Triple::hsail64:
+    case llvm::Triple::spir:
+    case llvm::Triple::spir64:
+    case llvm::Triple::kalimba:
+    case llvm::Triple::shave:
+    case llvm::Triple::lanai:
+    case llvm::Triple::wasm32:
+    case llvm::Triple::wasm64:
+    case llvm::Triple::renderscript32:
+    case llvm::Triple::renderscript64:
+      return false;
+    }
+  }
+  return true;
+}
+
+bool matchesContext(CodeGenModule &CGM,
+                    const CompleteOMPContextSelectorData &ContextData) {
+  for (const OMPContextSelectorData &Data : ContextData) {
+    switch (Data.Ctx) {
+    case OMP_CTX_vendor:
+      assert(Data.CtxSet == OMP_CTX_SET_implementation &&
+             "Expected implementation context selector set.");
+      if (!checkContext<OMP_CTX_SET_implementation, OMP_CTX_vendor>(Data))
+        return false;
+      break;
+    case OMP_CTX_kind:
+      assert(Data.CtxSet == OMP_CTX_SET_device &&
+             "Expected device context selector set.");
+      if (!checkContext<OMP_CTX_SET_device, OMP_CTX_kind, CodeGenModule &>(Data,
+                                                                           CGM))
+        return false;
+      break;
+    case OMP_CTX_unknown:
+      llvm_unreachable("Unknown context selector kind.");
+    }
+  }
+  return true;
+}
+
+static CompleteOMPContextSelectorData
+translateAttrToContextSelectorData(ASTContext &C,
+                                   const OMPDeclareVariantAttr *A) {
+  CompleteOMPContextSelectorData Data;
+  for (unsigned I = 0, E = A->scores_size(); I < E; ++I) {
+    Data.emplace_back();
+    auto CtxSet = static_cast<OpenMPContextSelectorSetKind>(
+        *std::next(A->ctxSelectorSets_begin(), I));
+    auto Ctx = static_cast<OpenMPContextSelectorKind>(
+        *std::next(A->ctxSelectors_begin(), I));
+    Data.back().CtxSet = CtxSet;
+    Data.back().Ctx = Ctx;
+    const Expr *Score = *std::next(A->scores_begin(), I);
+    Data.back().Score = Score->EvaluateKnownConstInt(C);
+    switch (Ctx) {
+    case OMP_CTX_vendor:
+      assert(CtxSet == OMP_CTX_SET_implementation &&
+             "Expected implementation context selector set.");
+      Data.back().Names =
+          llvm::makeArrayRef(A->implVendors_begin(), A->implVendors_end());
+      break;
+    case OMP_CTX_kind:
+      assert(CtxSet == OMP_CTX_SET_device &&
+             "Expected device context selector set.");
+      Data.back().Names =
+          llvm::makeArrayRef(A->deviceKinds_begin(), A->deviceKinds_end());
+      break;
+    case OMP_CTX_unknown:
+      llvm_unreachable("Unknown context selector kind.");
+    }
+  }
+  return Data;
+}
+
+static bool isStrictSubset(const CompleteOMPContextSelectorData &LHS,
+                           const CompleteOMPContextSelectorData &RHS) {
+  llvm::SmallDenseMap<std::pair<int, int>, llvm::StringSet<>, 4> RHSData;
+  for (const OMPContextSelectorData &D : RHS) {
+    auto &Pair = RHSData.FindAndConstruct(std::make_pair(D.CtxSet, D.Ctx));
+    Pair.getSecond().insert(D.Names.begin(), D.Names.end());
+  }
+  bool AllSetsAreEqual = true;
+  for (const OMPContextSelectorData &D : LHS) {
+    auto It = RHSData.find(std::make_pair(D.CtxSet, D.Ctx));
+    if (It == RHSData.end())
+      return false;
+    if (D.Names.size() > It->getSecond().size())
+      return false;
+    if (llvm::set_union(It->getSecond(), D.Names))
+      return false;
+    AllSetsAreEqual =
+        AllSetsAreEqual && (D.Names.size() == It->getSecond().size());
+  }
+
+  return LHS.size() != RHS.size() || !AllSetsAreEqual;
+}
+
+static bool greaterCtxScore(const CompleteOMPContextSelectorData &LHS,
+                            const CompleteOMPContextSelectorData &RHS) {
+  // Score is calculated as sum of all scores + 1.
+  llvm::APSInt LHSScore(llvm::APInt(64, 1), /*isUnsigned=*/false);
+  bool RHSIsSubsetOfLHS = isStrictSubset(RHS, LHS);
+  if (RHSIsSubsetOfLHS) {
+    LHSScore = llvm::APSInt::get(0);
+  } else {
+    for (const OMPContextSelectorData &Data : LHS) {
+      if (Data.Score.getBitWidth() > LHSScore.getBitWidth()) {
+        LHSScore = LHSScore.extend(Data.Score.getBitWidth()) + Data.Score;
+      } else if (Data.Score.getBitWidth() < LHSScore.getBitWidth()) {
+        LHSScore += Data.Score.extend(LHSScore.getBitWidth());
+      } else {
+        LHSScore += Data.Score;
+      }
+    }
+  }
+  llvm::APSInt RHSScore(llvm::APInt(64, 1), /*isUnsigned=*/false);
+  if (!RHSIsSubsetOfLHS && isStrictSubset(LHS, RHS)) {
+    RHSScore = llvm::APSInt::get(0);
+  } else {
+    for (const OMPContextSelectorData &Data : RHS) {
+      if (Data.Score.getBitWidth() > RHSScore.getBitWidth()) {
+        RHSScore = RHSScore.extend(Data.Score.getBitWidth()) + Data.Score;
+      } else if (Data.Score.getBitWidth() < RHSScore.getBitWidth()) {
+        RHSScore += Data.Score.extend(RHSScore.getBitWidth());
+      } else {
+        RHSScore += Data.Score;
+      }
+    }
+  }
+  return llvm::APSInt::compareValues(LHSScore, RHSScore) >= 0;
 }
 
 /// Finds the variant function that matches current context with its context
 /// selector.
-static const FunctionDecl *getDeclareVariantFunction(ASTContext &Ctx,
+static const FunctionDecl *getDeclareVariantFunction(CodeGenModule &CGM,
                                                      const FunctionDecl *FD) {
   if (!FD->hasAttrs() || !FD->hasAttr<OMPDeclareVariantAttr>())
     return FD;
   // Iterate through all DeclareVariant attributes and check context selectors.
-  auto &&Comparer = [&Ctx](const OMPDeclareVariantAttr *LHS,
-                           const OMPDeclareVariantAttr *RHS) {
-    return greaterCtxScore(Ctx, LHS->getScore(), RHS->getScore());
-  };
   const OMPDeclareVariantAttr *TopMostAttr = nullptr;
+  CompleteOMPContextSelectorData TopMostData;
   for (const auto *A : FD->specific_attrs<OMPDeclareVariantAttr>()) {
-    const OMPDeclareVariantAttr *SelectedAttr = nullptr;
-    switch (A->getCtxSelectorSet()) {
-    case OMPDeclareVariantAttr::CtxSetImplementation:
-      switch (A->getCtxSelector()) {
-      case OMPDeclareVariantAttr::CtxVendor:
-        if (checkContext<OMPDeclareVariantAttr::CtxSetImplementation,
-                         OMPDeclareVariantAttr::CtxVendor>(A))
-          SelectedAttr = A;
-        break;
-      case OMPDeclareVariantAttr::CtxUnknown:
-        llvm_unreachable(
-            "Unknown context selector in implementation selector set.");
-      }
-      break;
-    case OMPDeclareVariantAttr::CtxSetUnknown:
-      llvm_unreachable("Unknown context selector set.");
-    }
+    CompleteOMPContextSelectorData Data =
+        translateAttrToContextSelectorData(CGM.getContext(), A);
+    if (!matchesContext(CGM, Data))
+      continue;
     // If the attribute matches the context, find the attribute with the highest
     // score.
-    if (SelectedAttr && (!TopMostAttr || !Comparer(TopMostAttr, SelectedAttr)))
-      TopMostAttr = SelectedAttr;
+    if (!TopMostAttr || !greaterCtxScore(TopMostData, Data)) {
+      TopMostAttr = A;
+      TopMostData.swap(Data);
+    }
   }
   if (!TopMostAttr)
     return FD;
@@ -11098,7 +11286,7 @@ bool CGOpenMPRuntime::emitDeclareVariant(GlobalDecl GD, bool IsForDefinition) {
   llvm::GlobalValue *Orig = CGM.GetGlobalValue(MangledName);
   if (Orig && !Orig->isDeclaration())
     return false;
-  const FunctionDecl *NewFD = getDeclareVariantFunction(CGM.getContext(), D);
+  const FunctionDecl *NewFD = getDeclareVariantFunction(CGM, D);
   // Emit original function if it does not have declare variant attribute or the
   // context does not match.
   if (NewFD == D)
